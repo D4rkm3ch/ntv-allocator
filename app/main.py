@@ -239,9 +239,13 @@ class Allocator(discord.Client):
                     self.state.drop_removal(key)
                     await it.message.edit(content=f"**{r['label']}** is back in Plex; nothing removed.", view=None)
                     return
-                await self.ntv.backup()
-                done, failed = [], []
-                for ch, stored in r["pairs"]:
+                # only channels it is still on (you may have removed some yourself since the question)
+                current = await self.ntv.manual_lists()
+                still = [(c, st) for c, st in r["pairs"] if st in current.get(c, [])]
+                done, failed = [c for c, st in r["pairs"] if (c, st) not in still], []
+                if still:
+                    await self.ntv.backup()
+                for ch, stored in still:
                     try:
                         await self.ntv.remove_from_channel(ch, stored)
                         done.append(ch)
@@ -251,7 +255,8 @@ class Allocator(discord.Client):
                         log.exception("clean-up: could not remove %s from %s", r["label"], ch)
                         failed.append(ch)
                 for ch in done:
-                    await self.ntv.refresh_channel(ch)
+                    if any(c == ch for c, _ in still):
+                        await self.ntv.refresh_channel(ch)
         except Exception as exc:
             log.exception("removal of %s failed", r["label"])
             await it.followup.send(f"Could not remove this ({type(exc).__name__}). Nothing was recorded; "
@@ -426,6 +431,12 @@ class Allocator(discord.Client):
             await it.response.defer()
             try:
                 async with self.lock:
+                    # always confirm the title still exists: it may have been deleted since the question
+                    if not await self.plex.exists(key):
+                        self.state.mark_skipped(key, pend["label"])
+                        await it.message.edit(content=f"**{pend['label']}** is no longer in Plex; nothing added.",
+                                              embed=None, view=None)
+                        return
                     if key not in self.titles:
                         t = await self.plex.title(key)
                         if t:

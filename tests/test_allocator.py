@@ -27,6 +27,7 @@ class Plex:
     async def recently_added(self, d, ign): return self.keys
     async def title(self, k): return T.get(k)
     def qualified(self, k): return f"MID:{k}"
+    async def exists(self, k): return k not in getattr(self, "gone", set())
 
 class NTV:
     def __init__(self): self.calls = []; self.unassigned = []; self.fail_add = False
@@ -138,6 +139,14 @@ async def run():
     a.ntv.fail_add = False
     i = Inter("ntva:skip:9"); await a.on_interaction(i)
     check("Skip for now closes the question", a.state.get_pending("9") is None)
+
+    # approving a question for a title deleted from Plex in the meantime adds nothing
+    a.state.add_pending("77", "Gone Show (2027)", ["app_ef_x"]); a.plex.gone = {"77"}; a.ntv.calls.clear()
+    i = Inter("ntva:ok:77"); await a.on_interaction(i)
+    check("approve on a title deleted since the question adds nothing and closes it",
+          not [c for c in a.ntv.calls if c[0] == "add"] and a.state.get_pending("77") is None
+          and any(isinstance(x, tuple) and x[0] == "edit" and "no longer in Plex" in (x[1] or "") for x in i.log))
+    a.plex.gone = set()
 
     # restart: nothing repeats
     n = len(ch.sent); a.ntv.calls.clear(); a.ntv.unassigned = []
@@ -254,6 +263,14 @@ async def run_cleanup():
     check("clean-up: over CLEANUP_MAX_REMOVALS posts one warning and no questions",
           len(new) == 1 and new[0]["view"] is None and "paused" in new[0]["content"])
     lists.pop("app_genre_comedy")
+
+    # Remove after you took it off one channel yourself: only the remaining channel is touched
+    lists["app_genre_family"] = ["MID:66"]; lists["app_tcn"] = ["MID:66"]; plex_404.add("66")
+    await a.cleanup(); await a.cleanup()
+    lists["app_tcn"].remove("MID:66"); removed.clear()
+    i = Inter("ntva:rm:66"); await a.on_interaction(i)
+    check("clean-up: Remove skips channels it was already taken off and still closes the question",
+          removed == [("app_genre_family", "MID:66")] and a.state.get_removal("66")["status"] == "removed")
 
     # dry run posts nothing
     lists["app_lackluster"] = ["MID:55"]; plex_404.add("55")
