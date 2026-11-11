@@ -61,6 +61,27 @@ class Plex:
     def qualified(self, key: str) -> str:
         return f"{self.machine_id}:{key}"
 
+    async def library_keys(self) -> set[str]:
+        """Rating keys of every show and movie in every library. Raises if any library cannot be
+        read, so a partial answer can never make titles look deleted."""
+        keys: set[str] = set()
+        for sid, sec in self.sections.items():
+            if sec["type"] not in ("show", "movie"):
+                continue
+            t = 1 if sec["type"] == "movie" else 2
+            r = await self.http.get(f"{self.url}/library/sections/{sid}/all?type={t}", headers=self.h)
+            r.raise_for_status()
+            keys |= {str(m["ratingKey"]) for m in r.json()["MediaContainer"].get("Metadata", [])}
+        return keys
+
+    async def exists(self, key: str) -> bool:
+        """False only when Plex answers 404 for the item; any other failure raises."""
+        r = await self.http.get(f"{self.url}/library/metadata/{key}", headers=self.h)
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
+
 
 class NostalgiaTV:
     def __init__(self, url: str, api_key: str = "", username: str = "", password: str = "", profile_id: str = ""):
@@ -135,6 +156,22 @@ class NostalgiaTV:
         walk(data)
         log.debug("channels-containing %s -> %s", qualified_key, found)
         return found
+
+    async def manual_lists(self) -> dict[str, list[str]]:
+        """Channel id -> the keys saved in its manual list, exactly as stored."""
+        cfg = await self._req("GET", "/api/config/export")
+        lists: dict[str, list[str]] = {}
+        for ch, o in (cfg.get("channelOverrides") or {}).items():
+            if o.get("customMediaRatingKeys"):
+                lists[ch] = [str(k) for k in o["customMediaRatingKeys"]]
+        for c in cfg.get("customChannels") or []:
+            if c.get("stableId") and c.get("customMediaRatingKeys"):
+                lists[c["stableId"]] = [str(k) for k in c["customMediaRatingKeys"]]
+        return lists
+
+    async def remove_from_channel(self, channel_id: str, stored_key: str) -> None:
+        await self._req("POST", "/api/watch/remove-from-channel",
+                        json={"channelId": channel_id, "ratingKey": stored_key})
 
     async def config_homes(self, not_a_home: set[str]) -> tuple[dict[str, set[str]], set[str], set[str]]:
         """Returns (homes, manual, hidden).

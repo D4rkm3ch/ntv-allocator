@@ -61,7 +61,7 @@ channels:
 
 # Channels that do NOT count as a permanent home (a title only on these still needs placing).
 not_a_home:
-  - custom_newarrivals
+  - custom_newarrivals    # retired channel; listed so it can never count as a home if it lingers
   - custom_c1dd993ad7a7   # Winter Wonderland
   - custom_f1eb70fed6b5   # Haunted Hollow
 

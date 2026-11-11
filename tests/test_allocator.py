@@ -76,7 +76,7 @@ class Inter:
 def make(keys):
     a = M.Allocator.__new__(M.Allocator)
     a.rules = M.Rules(os.environ["RULES_PATH"]); a.state = M.State(os.environ["STATE_PATH"])
-    a.plex, a.ntv, a.lock, a.titles = Plex(keys), NTV(), asyncio.Lock(), {}
+    a.plex, a.ntv, a.lock, a.titles, a.missing_since = Plex(keys), NTV(), asyncio.Lock(), {}, {}
     ch = Chan()
     async def _channel(): return ch
     a._channel = _channel
@@ -112,10 +112,10 @@ async def run():
     # recently skipped title is not re-asked; old skip is
     a.state.mark_skipped("9", "Nine"); T["9"] = Title("9","show","Nine",2027,"TV Shows","x","TV-MA",["Drama"],"")
     a.ntv.unassigned = ["9"]; await a.scan()
-    check("title left on New Arrivals recently is not re-asked", a.state.get_pending("9") is None)
+    check("recently skipped title is not re-asked", a.state.get_pending("9") is None)
     a.state.db.execute("UPDATE skipped SET at=? WHERE key='9'", (time.time() - 31 * 86400,)); a.state.db.commit()
     await a.scan()
-    check("title left on New Arrivals over 30 days ago is asked again", a.state.get_pending("9") is not None)
+    check("title skipped over 30 days ago is asked again", a.state.get_pending("9") is not None)
 
     # approve flow: change selection, approve
     a.ntv.calls.clear()
@@ -137,7 +137,7 @@ async def run():
     check("failed approve reports an error and keeps the question", any(isinstance(x, tuple) and x[0]=="followup" for x in i.log) and a.state.get_pending("9") is not None)
     a.ntv.fail_add = False
     i = Inter("ntva:skip:9"); await a.on_interaction(i)
-    check("Leave on New Arrivals closes the question", a.state.get_pending("9") is None)
+    check("Skip for now closes the question", a.state.get_pending("9") is None)
 
     # restart: nothing repeats
     n = len(ch.sent); a.ntv.calls.clear(); a.ntv.unassigned = []
@@ -152,6 +152,72 @@ async def run():
     cleared = d.state.clear_dry_run(); await d.scan()
     check("going live clears dry-run decisions and applies them", cleared == 1 and [c for c in d.ntv.calls if c[0]=="add"])
 
+async def run_cleanup():
+    M.CFG["dry_run"] = False
+    a, ch = make([])
+    lists = {"app_genre_action": ["MID:1", "MID:7", "MID:8"], "app_genre_superhero": ["MID:1"],
+             "app_ntv": ["local:abc:ff01"], "app_ef_x": ["OTHER:1", "MID:2"]}
+    in_plex = {"7", "8", "2"}          # X-Men (1) deleted
+    plex_404 = {"1"}
+    removed = []
+    a.ntv.manual_lists = lambda: _ret({c: list(v) for c, v in lists.items()})
+    async def rm(c, k):
+        removed.append((c, k)); lists[c].remove(k)
+    a.ntv.remove_from_channel = rm
+    a.plex.library_keys = lambda: _ret(set(in_plex))
+    async def exists(k): return k not in plex_404
+    a.plex.exists = exists
+    a.plex.machine_id = "MID"
+
+    await a.cleanup()
+    check("clean-up: nothing removed on the first sighting", not removed)
+    await a.cleanup()
+    check("clean-up: deleted title removed from every channel on the second pass",
+          sorted(removed) == [("app_genre_action", "MID:1"), ("app_genre_superhero", "MID:1")])
+    check("clean-up: NTV local keys and other-server keys untouched",
+          lists["app_ntv"] == ["local:abc:ff01"] and "OTHER:1" in lists["app_ef_x"])
+    check("clean-up: backup taken and touched channels refreshed",
+          ("backup",) in a.ntv.calls and {c[1] for c in a.ntv.calls if c[0] == "refresh"} == {"app_genre_action", "app_genre_superhero"})
+    check("clean-up: nothing posted to Discord", not ch.sent)
+
+    # missing from the listing but Plex still answers the lookup: keep
+    removed.clear(); in_plex.discard("7")
+    await a.cleanup(); await a.cleanup()
+    check("clean-up: title missing from listing but still found by lookup is kept", not removed)
+
+    # a title that disappears for one pass then comes back is never removed
+    in_plex.add("7"); in_plex.discard("8"); plex_404.add("8")
+    await a.cleanup(); in_plex.add("8"); plex_404.discard("8"); await a.cleanup()
+    in_plex.discard("8"); plex_404.add("8"); await a.cleanup()
+    check("clean-up: a title that came back resets its confirmation", not removed)
+    in_plex.add("8"); plex_404.discard("8")
+
+    # Plex error during confirmation: nothing removed, error raised (logged by the loop)
+    async def boom(k): raise RuntimeError("plex down")
+    a.plex.exists = boom; in_plex.discard("2")
+    try:
+        await a.cleanup(); raised = False
+    except RuntimeError:
+        raised = True
+    check("clean-up: a Plex error aborts the pass without removing anything", raised and not removed)
+    a.plex.exists = exists; in_plex.add("2")
+
+    # mass disappearance (unmounted library) is refused
+    big = {f"app_genre_comedy": [f"MID:{n}" for n in range(1000, 1100)]}
+    lists.update(big); plex_404.update(str(n) for n in range(1000, 1100))
+    await a.cleanup(); await a.cleanup()
+    check("clean-up: more than CLEANUP_MAX_REMOVALS missing removes nothing", not removed)
+
+    # dry run removes nothing
+    lists.pop("app_genre_comedy"); lists["app_tcn"] = ["MID:55"]; plex_404.add("55")
+    M.CFG["dry_run"] = True
+    await a.cleanup(); await a.cleanup()
+    check("clean-up: dry run removes nothing", not removed)
+    M.CFG["dry_run"] = False
+
+async def _ret(v): return v
+
 asyncio.run(run())
+asyncio.run(run_cleanup())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

@@ -65,8 +65,8 @@ class State:
     def forget_resolved(self, key: str, skip_older_than_days: int) -> None:
         """Let a title the server reports unassigned be re-evaluated.
 
-        Pending questions are never touched (the question stays open in Discord). A title left on
-        New Arrivals is only re-asked once the New Arrivals window has passed."""
+        Pending questions are never touched (the question stays open in Discord). A skipped title
+        is only re-asked once REASK_DAYS have passed."""
         self.db.execute("DELETE FROM done WHERE key=?", (key,))
         self.db.execute("DELETE FROM skipped WHERE key=? AND at < ?",
                         (key, time.time() - skip_older_than_days * 86400))

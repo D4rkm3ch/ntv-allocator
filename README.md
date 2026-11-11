@@ -2,14 +2,15 @@
 
 Watches Plex and NostalgiaTV, finds shows and movies that have no permanent channel, and places them.
 Confident placements happen automatically; anything uncertain is posted to a Discord channel with a
-channel picker. Your choice is applied as soon as you press Approve.
+channel picker. Your choice is applied as soon as you press Approve. Titles you delete from Plex are
+removed from channel lists automatically (logged only, never posted).
 
 ## What it does and does not do
 
 - Only adds titles to channels that already exist. It never creates, hides, renames, renumbers or
-  removes channels, and never removes a title from a channel.
+  removes channels. The only removal it makes is the clean-up of titles deleted from Plex (below).
 - New episodes of shows you already have need nothing: channels hold whole shows.
-- A title only on New Arrivals or a seasonal channel counts as unplaced.
+- A title only on a seasonal channel counts as unplaced.
 - Before every change it takes a NostalgiaTV config backup (`/api/config/backups/create`), then
   refreshes only the channels it touched. Restore from Configure > Admin > Automatic Backup if needed.
 - YouTube, Classicals, Fan Edits, Reality Shows and Music are ignored (see `ignore_libraries`).
@@ -27,9 +28,22 @@ channel picker. Your choice is applied as soon as you press Approve.
      combine the rules with NostalgiaTV's own criteria matches on visible channels (it knows original
      networks, e.g. NBC for The Office, which Plex often does not).
 4. In Discord, adjust the selection (up to 3 channels) and press **Approve**, or press
-   **Leave on New Arrivals** to decide later. A title still unassigned once the New Arrivals window
-   (`NEW_ARRIVALS_DAYS`, default 30) has passed is asked about again, once. Open questions are never
-   re-posted.
+   **Skip for now** to decide later. A skipped title that still has no channel after `REASK_DAYS`
+   (default 30) is asked about again, once. Open questions are never re-posted.
+5. Clean-up: titles deleted from Plex are removed from every channel's manual list (see below).
+
+## Clean-up of deleted titles
+
+After each scan, every channel's manual list is compared with Plex. A title is removed from all its
+channels when it is missing from every Plex library listing **and** Plex answers "not found" for it, on
+two consecutive scans (so about 15 minutes after you delete it). Removals go to the container log only.
+
+- Only keys from your Plex server are checked; NostalgiaTV's own local media is never touched.
+- If Plex errors during the check, nothing is removed that pass.
+- If more than `CLEANUP_MAX_REMOVALS` (default 50) titles would go in one pass, nothing is removed and a
+  warning is logged: that usually means a library or drive is unmounted. Raise the limit for a big purge.
+- A backup is taken before removing, and only the affected channels are refreshed.
+- Set `CLEANUP=false` to turn it off. With `DRY_RUN=true` it only logs what it would remove.
 
 Validated against the line-up built on 2026-11-11: 113 of 171 shows and 561 of 564 movies would be
 placed automatically, and 1 automatic show placement (Bump in the Night: Faux Kids instead of ITV) differs
@@ -89,7 +103,7 @@ which is not in the catalogue stops the container with a clear error instead of 
 - Verified live on 2026-11-11: X-Men placed automatically (Superhero, Action, Lackluster); The Office (US)
   approved through Discord.
 - If NostalgiaTV refuses a title for a channel, the reason is logged and posted in Discord. A title refused
-  on every channel is not recorded as placed and is asked about again after the New Arrivals window.
+  on every channel is not recorded as placed and is asked about again after `REASK_DAYS`.
 - One title failing to evaluate (for example a Plex lookup error) is logged and retried next scan; the
   rest of the scan continues. A failed Approve shows an error in Discord and leaves the question open.
 - State lives in `/data/state.db`. Deleting it makes the allocator re-check everything; nothing is
