@@ -87,9 +87,17 @@ def render(s: dict) -> str:
     st = s["settings"]
     return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=refresh content=30>
-<title>NTV Allocator</title><style>
+<title>NTV Allocator</title>
+<script>try{{var t=localStorage.getItem("ntva-theme");if(t)document.documentElement.dataset.theme=t}}catch(e){{}}</script><style>
 :root{{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--dim:#6b7385;--line:#e3e6ec;--ok:#1f8a4c;--bad:#c62f2f;--wait:#a26b00}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}}}}
+@media (prefers-color-scheme:dark){{:root:not([data-theme=light]){{--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}}}}
+:root[data-theme=dark]{{--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}}
+.head{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}
+.theme{{background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:8px;width:38px;height:38px;
+display:grid;place-items:center;cursor:pointer;padding:0;flex:none}}.theme:hover{{border-color:var(--dim)}}
+.theme svg{{width:18px;height:18px}}.theme .sun{{display:none}}
+:root[data-theme=dark] .theme .sun{{display:block}}:root[data-theme=dark] .theme .moon{{display:none}}
+@media (prefers-color-scheme:dark){{:root:not([data-theme=light]) .theme .sun{{display:block}}:root:not([data-theme=light]) .theme .moon{{display:none}}}}
 body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}}
 main{{max-width:960px;margin:0 auto;padding:24px 16px}}h1{{font-size:20px;margin:0 0 4px}}h2{{font-size:15px;margin:0 0 10px}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto}}
@@ -101,7 +109,14 @@ th{{color:var(--dim);font-weight:500;border-top:0}}.dim{{color:var(--dim)}}.nowr
 .pill.ok{{color:var(--ok);border:1px solid var(--ok)}}.pill.bad{{color:var(--bad);border:1px solid var(--bad)}}.pill.wait{{color:var(--wait);border:1px solid var(--wait)}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}}.num{{font-size:22px;font-weight:600}}
 </style></head><body><main>
-<h1>NTV Allocator</h1><p class=dim>Refreshes every 30 seconds. Running since {e(_t(s["started"]))}.</p>
+<div class=head><div><h1>NTV Allocator</h1><p class=dim>Refreshes every 30 seconds. Running since {e(_t(s["started"]))}.</p></div>
+<button class=theme id=theme type=button aria-label="Toggle dark mode" title="Toggle dark mode">
+<svg class=moon viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+<svg class=sun viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+</button></div>
+<script>document.getElementById("theme").onclick=function(){{var r=document.documentElement,
+d=r.dataset.theme?r.dataset.theme==="dark":matchMedia("(prefers-color-scheme: dark)").matches,n=d?"light":"dark";
+r.dataset.theme=n;try{{localStorage.setItem("ntva-theme",n)}}catch(e){{}}}};</script>
 <div class=card><div class=banner><span class=dot></span>{e(label)}</div></div>
 <div class=card><h2>Connections</h2><table><tr><th>Service</th><th>Status</th><th>Last check</th><th>Detail</th></tr>{rows}</table></div>
 <div class=card><div class=grid>
