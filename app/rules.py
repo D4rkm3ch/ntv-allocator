@@ -102,8 +102,9 @@ class Rules:
                 out.append(c)
         return out[: self.max]
 
-    def channel_choices(self, t: Title) -> list[tuple[str, str]]:
-        """Channels offered in the Discord picker for this kind of title (max 25)."""
+    def channel_choices(self, t: Title, first: list[str] | None = None) -> list[tuple[str, str]]:
+        """Channels offered in the Discord picker (Discord allows 25). Suggested channels come first
+        so they are always present."""
         if t.kind == "movie":
             order = ["movies", "adult_tv", "documentary", "anime", "kids"]
         elif t.library == "Anime":
@@ -114,9 +115,9 @@ class Rules:
             order = ["kids", "adult_tv", "anime"]
         else:
             order = ["adult_tv", "documentary", "kids"]
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, str]] = [(c, self.names[c]) for c in (first or []) if c in self.names]
         for g in order:
-            out.extend(self.groups.get(g, {}).items())
+            out.extend(item for item in self.groups.get(g, {}).items() if item not in out)
         return out[:25]
 
     # ------------------------------------------------------------------ placement

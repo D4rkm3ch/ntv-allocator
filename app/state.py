@@ -62,8 +62,12 @@ class State:
         self.db.commit()
         return cur.rowcount
 
-    def forget(self, key: str) -> None:
-        """Allow a title to be re-evaluated (e.g. it lost its channels)."""
-        for t in ("pending", "done", "skipped"):
-            self.db.execute(f"DELETE FROM {t} WHERE key=?", (key,))
+    def forget_resolved(self, key: str, skip_older_than_days: int) -> None:
+        """Let a title the server reports unassigned be re-evaluated.
+
+        Pending questions are never touched (the question stays open in Discord). A title left on
+        New Arrivals is only re-asked once the New Arrivals window has passed."""
+        self.db.execute("DELETE FROM done WHERE key=?", (key,))
+        self.db.execute("DELETE FROM skipped WHERE key=? AND at < ?",
+                        (key, time.time() - skip_older_than_days * 86400))
         self.db.commit()

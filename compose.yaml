@@ -21,7 +21,7 @@ services:
       # Behaviour
       - SCAN_INTERVAL_MINUTES=15
       - LOOKBACK_DAYS=35
-      - DRY_RUN=true            # change to false once the Discord posts look right
+      - DRY_RUN=false           # true = post what it would do without changing anything
       - LOG_LEVEL=INFO
     volumes:
       - /mnt/Swimming/Sandboxes/docker/ntv-allocator/config:/config

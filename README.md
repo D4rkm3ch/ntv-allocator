@@ -17,13 +17,19 @@ channel picker. Your choice is applied as soon as you press Approve.
 ## How a scan works (every 15 minutes by default)
 
 1. Ask NostalgiaTV for unassigned content, and ask Plex for shows and movies added in the last 35 days.
-2. Skip anything already handled, and anything that already has a permanent channel.
+2. Skip anything already handled, and anything that already has a permanent channel. A title counts as
+   placed when a visible channel's manual list contains it (read from the exported config). NostalgiaTV's
+   `channels-containing` lookup is only trusted for visible channels without a manual list: it also
+   reports automatic-criteria matches and hidden channels.
 3. Place each remaining title with `rules.yaml`:
    - automatic: placed, then listed in a "Placed automatically" message
-   - not certain: posted as "Where should this go?" with suggestions pre-selected
+   - not certain: posted as "Where should this go?" with up to 3 suggestions pre-selected. Suggestions
+     combine the rules with NostalgiaTV's own criteria matches on visible channels (it knows original
+     networks, e.g. NBC for The Office, which Plex often does not).
 4. In Discord, adjust the selection (up to 3 channels) and press **Approve**, or press
-   **Leave on New Arrivals** to decide later. A title still unassigned when it leaves New Arrivals
-   is asked about again.
+   **Leave on New Arrivals** to decide later. A title still unassigned once the New Arrivals window
+   (`NEW_ARRIVALS_DAYS`, default 30) has passed is asked about again, once. Open questions are never
+   re-posted.
 
 Validated against the line-up built on 2026-11-11: 113 of 171 shows and 561 of 564 movies would be
 placed automatically, and 1 automatic show placement (Bump in the Night: Faux Kids instead of ITV) differs
@@ -51,10 +57,7 @@ Use your existing Plex token (the same one your other apps use) for `PLEX_TOKEN`
 Every push to `main` builds `ghcr.io/d4rkm3ch/ntv-allocator:latest` with GitHub Actions
 (`.github/workflows/image.yml`), so the NAS only pulls an image.
 
-1. One-time registry login on the NAS, because the repository and its image are private. Create a GitHub
-   token (Settings > Developer settings > Personal access tokens > Tokens (classic)) with only `read:packages`,
-   then on the NAS shell: `docker login ghcr.io -u D4rkm3ch` and paste the token as the password.
-   (Alternatively, set the package to public under the repository's Packages; the image contains no secrets.)
+1. The image is public, so no registry login is needed.
 2. Create the folders `/mnt/Swimming/Sandboxes/docker/ntv-allocator/config` and `.../data`, owned by your PUID/PGID.
 3. In Dockge, create a stack named `ntv-allocator`, paste `compose.yaml`, and put the values from
    `.env.example` in the stack's `.env` box.
@@ -78,11 +81,16 @@ which is not in the catalogue stops the container with a clear error instead of 
 - `app/rules.py`: placement rules engine
 - `app/clients.py`: Plex and NostalgiaTV API clients
 - `app/state.py`: SQLite record of decisions (`/data/state.db`)
+- `tests/test_allocator.py`: end-to-end checks against fake Plex, NostalgiaTV and Discord
+  (`python tests/test_allocator.py`)
 
 ## Notes
 
-- Tested against simulated Plex and NostalgiaTV servers and the real library inventory, not yet against
-  your live server; that is what the dry run is for.
-- If NostalgiaTV refuses a title for a channel, the reason is written to the container log.
+- Verified live on 2026-11-11: X-Men placed automatically (Superhero, Action, Lackluster); The Office (US)
+  approved through Discord.
+- If NostalgiaTV refuses a title for a channel, the reason is logged and posted in Discord. A title refused
+  on every channel is not recorded as placed and is asked about again after the New Arrivals window.
+- One title failing to evaluate (for example a Plex lookup error) is logged and retried next scan; the
+  rest of the scan continues. A failed Approve shows an error in Discord and leaves the question open.
 - State lives in `/data/state.db`. Deleting it makes the allocator re-check everything; nothing is
   placed twice because titles that already have channels are skipped.

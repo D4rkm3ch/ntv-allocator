@@ -136,12 +136,12 @@ class NostalgiaTV:
         log.debug("channels-containing %s -> %s", qualified_key, found)
         return found
 
-    async def config_homes(self, not_a_home: set[str]) -> tuple[dict[str, set[str]], set[str]]:
-        """Returns (homes, excluded).
+    async def config_homes(self, not_a_home: set[str]) -> tuple[dict[str, set[str]], set[str], set[str]]:
+        """Returns (homes, manual, hidden).
 
         homes: Plex rating key -> visible channels whose saved manual list contains it.
-        excluded: channels whose lookup matches must be ignored (manual-list channels, whose
-        automatic criteria do not apply, and hidden channels).
+        manual: channels whose content is a manual list (their automatic criteria do not apply).
+        hidden: hidden channels (never a home).
 
         Read from the exported config, because channels-containing does not always report
         titles placed on a channel by manual list."""
@@ -161,8 +161,7 @@ class NostalgiaTV:
             add(ch, o.get("customMediaRatingKeys"))
         for c in cfg.get("customChannels") or []:
             add(c.get("stableId"), c.get("customMediaRatingKeys"))
-        # hidden channels never count as a home, even if the lookup reports them
-        return homes, manual | hidden
+        return homes, manual, hidden
 
     async def add_to_channel(self, channel_id: str, qualified_keys: list[str]) -> dict:
         return await self._req("POST", "/api/content/add-to-channel",

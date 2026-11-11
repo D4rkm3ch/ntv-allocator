@@ -31,6 +31,7 @@ CFG = {
     "discord_token": env("DISCORD_TOKEN"), "discord_channel": int(env("DISCORD_CHANNEL_ID", "0") or 0),
     "allowed_users": {int(x) for x in env("DISCORD_ALLOWED_USER_IDS").split(",") if x.strip()},
     "interval": int(env("SCAN_INTERVAL_MINUTES", "15")), "lookback": int(env("LOOKBACK_DAYS", "35")),
+    "new_arrivals_days": int(env("NEW_ARRIVALS_DAYS", "30")),
     "dry_run": env("DRY_RUN", "false").lower() in ("1", "true", "yes"),
     "rules": env("RULES_PATH", "/config/rules.yaml"), "state": env("STATE_PATH", "/data/state.db"),
 }
@@ -97,77 +98,120 @@ class Allocator(discord.Client):
             recent = set(await self.plex.recently_added(CFG["lookback"], self.rules.ignore_libraries))
             # a title the server reports unassigned is re-evaluated even if handled before
             for k in unassigned:
-                self.state.forget(k)
+                self.state.forget_resolved(k, CFG["new_arrivals_days"])
             candidates = [k for k in unassigned | recent if not self.state.is_known(k)]
             log.info("scan: %d unassigned, %d recent, %d to evaluate", len(unassigned), len(recent), len(candidates))
+            if not candidates:
+                await self._post_unsent()
+                return
 
-            config_homes, excluded = await self.ntv.config_homes(self.rules.not_a_home) if candidates else ({}, set())
+            config_homes, manual, hidden = await self.ntv.config_homes(self.rules.not_a_home)
             auto: dict[str, list[str]] = {}
             for key in candidates:
-                t = await self.plex.title(key)
-                if t is None or t.library in self.rules.ignore_libraries:
-                    self.state.mark_skipped(key, t.label if t else key)   # not ours; do not look it up again
-                    continue
-                self.titles[key] = t
-                homes = sorted(config_homes.get(key, set()))
-                if not homes:
-                    # NostalgiaTV's lookup also matches automatic criteria (which do not apply to
-                    # manual-list channels) and hidden channels; only visible criteria channels count
-                    reported = await self.ntv.channels_containing(self.plex.qualified(key))
-                    homes = [c for c in reported if c not in self.rules.not_a_home and c not in excluded]
-                    ignored = [c for c in reported if c not in homes]
-                    if ignored:
-                        log.info("%s: lookup also reported %s (hidden, manual-list or non-home channels, ignored)",
-                                 t.label, ignored)
-                if homes:
-                    log.info("%s: already on %s, nothing to do", t.label, homes)
-                    self.state.mark_done(key, t.label, homes, "already placed")
-                    continue
-                p = self.rules.place(t)
-                log.info("%s: %s -> %s", t.label, "automatic" if p.auto and p.channels else "ask in Discord",
-                         p.channels or "no suggestion")
-                if p.auto and p.channels:
-                    auto[key] = p.channels
-                else:
-                    self.state.add_pending(key, t.label, p.channels)
+                try:
+                    await self._evaluate(key, config_homes, manual, hidden, auto)
+                except Exception:
+                    # one bad title must not stop the rest of the scan; it is retried next scan
+                    log.exception("could not evaluate rating key %s", key)
 
             if auto:
                 await self.apply(auto, how="auto")
-                await self._post_summary(auto)
-            for pend in self.state.unsent():
-                await self._post_question(pend)
+            await self._post_unsent()
 
-    async def apply(self, placements: dict[str, list[str]], how: str) -> None:
+    async def _evaluate(self, key: str, config_homes: dict, manual: set, hidden: set, auto: dict) -> None:
+        t = await self.plex.title(key)
+        if t is None or t.library in self.rules.ignore_libraries:
+            self.state.mark_skipped(key, t.label if t else key)   # not ours; do not look it up again
+            return
+        self.titles[key] = t
+        homes = sorted(config_homes.get(key, set()))
+        hints: list[str] = []
+        if not homes:
+            # NostalgiaTV's lookup also matches automatic criteria (which do not apply to
+            # manual-list channels) and hidden channels; only visible criteria channels count
+            reported = await self.ntv.channels_containing(self.plex.qualified(key))
+            homes = [c for c in reported if c not in self.rules.not_a_home and c not in manual and c not in hidden]
+            # criteria matches on visible manual-list channels are useful suggestions (NostalgiaTV
+            # knows networks, e.g. NBC for The Office, which Plex's studio field often lacks)
+            hints = [c for c in reported if c in manual and c not in hidden and c in self.rules.names]
+            ignored = [c for c in reported if c not in homes]
+            if ignored:
+                log.info("%s: lookup also reported %s (hidden, manual-list or non-home channels, ignored)",
+                         t.label, ignored)
+        if homes:
+            log.info("%s: already on %s, nothing to do", t.label, homes)
+            self.state.mark_done(key, t.label, homes, "already placed")
+            return
+        p = self.rules.place(t)
+        if p.auto and p.channels:
+            log.info("%s: automatic -> %s", t.label, p.channels)
+            auto[key] = p.channels
+            return
+        # question: channels both agree on first, then NostalgiaTV's hints, then the rules' picks
+        both = [c for c in p.channels if c in hints]
+        suggested = list(dict.fromkeys(both + hints + p.channels))[: self.rules.max]
+        log.info("%s: ask in Discord -> %s (rules %s, NostalgiaTV hints %s)", t.label,
+                 suggested or "no suggestion", p.channels, hints)
+        self.state.add_pending(key, t.label, suggested)
+
+    async def _post_unsent(self) -> None:
+        for pend in self.state.unsent():
+            try:
+                await self._post_question(pend)
+            except Exception:
+                log.exception("could not post question for %s", pend["label"])
+
+    async def apply(self, placements: dict[str, list[str]], how: str) -> dict[str, list[str]]:
+        """Add titles to channels. Returns key -> channels actually accepted, and posts a summary
+        for automatic placements (including anything NostalgiaTV refused)."""
         by_channel: dict[str, list[str]] = defaultdict(list)
         for key, chans in placements.items():
             for c in chans:
                 by_channel[c].append(self.plex.qualified(key))
+        accepted: dict[str, list[str]] = {k: list(c) for k, c in placements.items()}
+        refusals: list[str] = []
         if CFG["dry_run"]:
             log.info("DRY RUN, would add: %s", dict(by_channel))
         else:
             await self.ntv.backup()
             for ch, keys in by_channel.items():
                 res = await self.ntv.add_to_channel(ch, keys)
-                refused = (res or {}).get("refused") or []
-                if refused:
-                    log.warning("channel %s refused %s", ch, refused)
+                for r in (res or {}).get("refused") or []:
+                    rk = str(r.get("ratingKey", "") if isinstance(r, dict) else r).split(":")[-1]
+                    reason = r.get("reason", "no reason given") if isinstance(r, dict) else "no reason given"
+                    log.warning("NostalgiaTV refused %s on %s: %s", rk, ch, reason)
+                    if rk in accepted and ch in accepted[rk]:
+                        accepted[rk].remove(ch)
+                    label = self.titles[rk].label if rk in self.titles else rk
+                    refusals.append(f"{label} on {self.rules.names.get(ch, ch)}: {reason}")
                 await self.ntv.refresh_channel(ch)
-        for key, chans in placements.items():
+        for key, chans in accepted.items():
             label = self.titles[key].label if key in self.titles else key
+            if not chans:
+                # nothing accepted: do not record it as placed; asked again after the New Arrivals window
+                self.state.mark_skipped(key, label)
+                continue
             # dry-run decisions are remembered (so they are not re-posted every scan) but flagged,
             # and cleared on the first start without DRY_RUN so they are applied for real
             self.state.mark_done(key, label, chans, f"dry run ({how})" if CFG["dry_run"] else how)
+        if how == "auto":
+            await self._post_summary({k: c for k, c in accepted.items() if c}, refusals)
+        elif refusals:
+            await (await self._channel()).send("**NostalgiaTV refused**\n" + "\n".join(refusals))
+        return accepted
 
     # ------------------------------------------------------------------ Discord output
     def _names(self, chans: list[str]) -> str:
         return ", ".join(self.rules.names.get(c, c) for c in chans) or "none"
 
-    async def _post_summary(self, placed: dict[str, list[str]]) -> None:
+    async def _post_summary(self, placed: dict[str, list[str]], refusals: list[str]) -> None:
         lines = [f"{self.titles[k].label} [{self.titles[k].library}]: {self._names(c)}" for k, c in placed.items()]
         head = "Placed automatically" + (" (dry run, nothing changed)" if CFG["dry_run"] else "")
         ch = await self._channel()
         for i in range(0, len(lines), 20):
             await ch.send(f"**{head}**\n" + "\n".join(lines[i:i + 20]))
+        if refusals:
+            await ch.send("**NostalgiaTV refused**\n" + "\n".join(refusals))
 
     async def _post_question(self, pend: dict) -> None:
         key = pend["key"]
@@ -188,8 +232,9 @@ class Allocator(discord.Client):
 
     def _view(self, t: Title, selected: list[str]) -> discord.ui.View:
         v = discord.ui.View(timeout=None)
-        opts = [discord.SelectOption(label=name[:100], value=cid, default=cid in selected)
-                for cid, name in self.rules.channel_choices(t)]
+        choices = self.rules.channel_choices(t, first=selected)
+        opts = [discord.SelectOption(label=name[:100], value=cid, default=cid in selected[: self.rules.max])
+                for cid, name in choices]
         v.add_item(discord.ui.Select(custom_id=f"ntva:sel:{t.key}", placeholder="Pick channels",
                                      min_values=1, max_values=min(self.rules.max, len(opts)), options=opts))
         v.add_item(discord.ui.Button(custom_id=f"ntva:ok:{t.key}", label="Approve", style=discord.ButtonStyle.success))
@@ -221,19 +266,27 @@ class Allocator(discord.Client):
                                            embed=None, view=None)
             return
         if action == "ok":
-            chans = pend["selected"] or pend["suggested"]
+            chans = (pend["selected"] or pend["suggested"])[: self.rules.max]
             if not chans:
                 await it.response.send_message("Pick at least one channel first.", ephemeral=True)
                 return
             await it.response.defer()
-            async with self.lock:
-                if key not in self.titles:
-                    t = await self.plex.title(key)
-                    if t:
-                        self.titles[key] = t
-                await self.apply({key: chans[: self.rules.max]}, how=f"approved by {it.user.name}")
-            await it.message.edit(content=f"**{pend['label']}**: added to {self._names(chans)}"
-                                          + (" (dry run, nothing changed)" if CFG["dry_run"] else "") + ".",
+            try:
+                async with self.lock:
+                    if key not in self.titles:
+                        t = await self.plex.title(key)
+                        if t:
+                            self.titles[key] = t
+                    accepted = await self.apply({key: chans}, how=f"approved by {it.user.name}")
+            except Exception as exc:
+                log.exception("approval of %s failed", pend["label"])
+                await it.followup.send(f"Could not apply this ({type(exc).__name__}). Nothing was recorded; "
+                                       f"press Approve again to retry, or check the container logs.", ephemeral=True)
+                return
+            done = accepted.get(key) or []
+            text = (f"**{pend['label']}**: added to {self._names(done)}" if done
+                    else f"**{pend['label']}**: NostalgiaTV refused every channel; it stays on New Arrivals")
+            await it.message.edit(content=text + (" (dry run, nothing changed)" if CFG["dry_run"] else "") + ".",
                                   embed=None, view=None)
 
 
