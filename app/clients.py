@@ -136,6 +136,26 @@ class NostalgiaTV:
         log.debug("channels-containing %s -> %s", qualified_key, found)
         return found
 
+    async def config_homes(self, not_a_home: set[str]) -> dict[str, set[str]]:
+        """Plex rating key -> visible channels whose saved manual list contains it.
+
+        Read from the exported config, because channels-containing does not always report
+        titles placed on a channel by manual list."""
+        cfg = await self._req("GET", "/api/config/export")
+        hidden = set(cfg.get("hiddenChannels") or [])
+        homes: dict[str, set[str]] = {}
+
+        def add(ch, keys):
+            if ch in hidden or ch in not_a_home:
+                return
+            for k in keys or []:
+                homes.setdefault(str(k).split(":")[-1], set()).add(ch)
+        for ch, o in (cfg.get("channelOverrides") or {}).items():
+            add(ch, o.get("customMediaRatingKeys"))
+        for c in cfg.get("customChannels") or []:
+            add(c.get("stableId"), c.get("customMediaRatingKeys"))
+        return homes
+
     async def add_to_channel(self, channel_id: str, qualified_keys: list[str]) -> dict:
         return await self._req("POST", "/api/content/add-to-channel",
                                json={"channelId": channel_id, "ratingKeys": qualified_keys})

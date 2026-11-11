@@ -101,6 +101,7 @@ class Allocator(discord.Client):
             candidates = [k for k in unassigned | recent if not self.state.is_known(k)]
             log.info("scan: %d unassigned, %d recent, %d to evaluate", len(unassigned), len(recent), len(candidates))
 
+            config_homes = await self.ntv.config_homes(self.rules.not_a_home) if candidates else {}
             auto: dict[str, list[str]] = {}
             for key in candidates:
                 t = await self.plex.title(key)
@@ -108,8 +109,10 @@ class Allocator(discord.Client):
                     self.state.mark_skipped(key, t.label if t else key)   # not ours; do not look it up again
                     continue
                 self.titles[key] = t
-                homes = [c for c in await self.ntv.channels_containing(self.plex.qualified(key))
-                         if c not in self.rules.not_a_home]
+                homes = sorted(config_homes.get(key, set()))
+                if not homes:
+                    homes = [c for c in await self.ntv.channels_containing(self.plex.qualified(key))
+                             if c not in self.rules.not_a_home]
                 if homes:
                     self.state.mark_done(key, t.label, homes, "already placed")
                     continue
