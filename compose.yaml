@@ -1,0 +1,13 @@
+services:
+  ntv-allocator:
+    build: .
+    container_name: ntv-allocator
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Australia/Sydney
+    user: "${PUID}:${PGID}"
+    volumes:
+      - /mnt/Swimming/Sandboxes/docker/ntv-allocator/config:/config
+      - /mnt/Swimming/Sandboxes/docker/ntv-allocator/data:/data
+    # Same Docker network as NostalgiaTV is not required; NTV_URL can use the NAS address.

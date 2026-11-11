@@ -1,0 +1,175 @@
+# NostalgiaTV Channel Allocator - placement rules
+#
+# The allocator only ever ADDS titles to channels that already exist. It never creates,
+# hides, renames or removes channels, and never removes a title from a channel.
+#
+# How a title is placed:
+#   1. A `title_overrides` entry wins outright.
+#   2. Movies run through the movie rules (genre, era, curated lists). Movie placements are automatic.
+#   3. Shows run through the rules for their Plex library, top to bottom; every matching rule
+#      contributes channels. A rule marked `auto: true` lets the allocator place the show itself.
+#      Otherwise the suggestions are posted to Discord for approval.
+#   4. Anything with no suggestion at all is always posted to Discord.
+#   At most `max_channels_per_title` channels are used per title.
+#
+# Matching keys (all optional, all case-insensitive, regex where noted):
+#   title (regex), studio (regex), genres_any (list), rating_any (list), year_min, year_max, summary (regex)
+#   fallback: true  -> the rule only applies when no earlier rule for that library matched
+
+max_channels_per_title: 3
+
+# Channels the allocator may use, grouped for the Discord picker. stable_id: display name
+channels:
+  kids:
+    custom_db7c7a5c0abd: ITV (YTV)
+    custom_teletoon: TeleToonz
+    app_cartoon_net: Cartoon Net
+    app_pennyodeon: Pennyodeon
+    app_faux_kids: Faux Kids
+    app_boomer_rang: Boomer-Rang
+  anime:
+    app_tunami: Tunami
+    app_munchyroll: Munchyroll
+  adult_tv:
+    app_faux: Faux
+    app_adult_skim: Adult Skim
+    app_comedy_middle: The Comedy Netwerk
+    app_cb_sea: Showcaze
+    app_nb_sea: NB Sea
+    app_tee_bs: Tee BS
+    app_ef_x: EF X
+    app_bb_sea: BB Sea
+    app_sigh_fi: Sigh Fi
+    app_hb_yo_min: HB Yo Min
+    app_netflicks: Netflicks
+    app_dizzy_plus: Dizzy+
+    app_genre_superhero: Superhero
+    app_terror_channel: Terror Channel
+  documentary:
+    app_truth_tv: Truth TV
+    app_national_geography: National Geography
+    app_animal_globe: Animal Globe
+  movies:
+    app_genre_action: Action
+    app_genre_comedy: Comedy
+    app_genre_family: Family
+    app_genre_scifi: Sci-Fi
+    app_genre_thriller: Crime & Thriller
+    app_genre_kaiju: Kaiju / Monsters
+    app_tcn: TCN (pre-1990)
+    app_lackluster: Lackluster (1990-2005)
+
+# Channels that do NOT count as a permanent home (a title only on these still needs placing).
+not_a_home:
+  - custom_newarrivals
+  - custom_c1dd993ad7a7   # Winter Wonderland
+  - custom_f1eb70fed6b5   # Haunted Hollow
+
+# Libraries the allocator ignores (YouTube is carried whole by You-Toob).
+ignore_libraries: [YouTube, Classicals, Fan Edits, Reality Shows, Music]
+
+# Exact-title decisions. Discord approvals are remembered separately in the state database.
+title_overrides: {}
+#  "Some Show (2027)": [app_ef_x, app_comedy_middle]
+
+# ---------------------------------------------------------------- shows
+shows:
+  Anime:
+    - {channels: [app_munchyroll], auto: true}
+    - {year_max: 2007, channels: [app_tunami], auto: true}
+
+  Documentary Shows:
+    - {title: "Louis Theroux|Tiger King", channels: [app_truth_tv], auto: true}
+    - {summary: "true crime|murder|cult|prison|investigat|scam|fraud", channels: [app_truth_tv]}
+    - {title: "dinosaur|prehistoric|jurassic|walking with", channels: [app_national_geography], auto: true}
+    - {summary: "dinosaur|prehistoric|fossil|extinct|evolution", channels: [app_national_geography], auto: true}
+    - {studio: "BBC|Silverback|Humble Bee|Plimsoll|Attenborough|Natural History|Discovery|National Geographic",
+       channels: [app_animal_globe], auto: true}
+    - {summary: "wildlife|animal|planet|ocean|nature|species|habitat", channels: [app_animal_globe], auto: true}
+
+  Animated Shows:
+    # anime-style action shows (Toei etc.)
+    - {studio: "Toei|TMS|Pierrot|Sunrise|XEBEC", channels: [app_tunami, custom_db7c7a5c0abd], auto: true}
+    # adult animation
+    - {rating_any: [TV-MA, TV-14], studio: "Williams Street|Adult Swim|Cartoon Network", channels: [app_adult_skim], auto: true}
+    - {rating_any: [TV-MA, TV-14], studio: "20th Century|Fox|Bento Box", channels: [app_faux], auto: true}
+    - {rating_any: [TV-MA, TV-14], studio: "Netflix|Blur", channels: [app_netflicks]}
+    - {rating_any: [TV-MA, TV-14], studio: "HBO|Max", channels: [app_hb_yo_min]}
+    - {rating_any: [TV-MA, TV-14], studio: "Amazon", channels: [app_genre_superhero]}
+    - {rating_any: [TV-MA, TV-14], studio: "Comedy Central|South Park", channels: [app_comedy_middle], auto: true}
+    - {rating_any: [TV-MA, TV-14], channels: [app_adult_skim], fallback: true}
+    # kids animation, by studio
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], studio: "Nickelodeon|Klasky|Games Animation|Frederator|Billionfold|Gunther-Wahl|Peter Hannan",
+       channels: [app_pennyodeon, custom_db7c7a5c0abd], auto: true}
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], studio: "Cartoon Network|Hanna-Barbera|a\\.k\\.a\\. Cartoon|Stretch Films",
+       channels: [app_cartoon_net, custom_teletoon], auto: true}
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], studio: "Disney",
+       channels: [app_dizzy_plus, custom_teletoon], auto: true}
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], studio: "Nelvana|Mainframe|Teletoon|Cinar|Alliance|Corus|YTV|Decode|Atomic Cartoons|Guru",
+       channels: [custom_db7c7a5c0abd, custom_teletoon], auto: true}
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], studio: "Warner|Amblin|Universal Cartoon",
+       channels: [app_boomer_rang], auto: true}
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], studio: "Marvel|Saban|DiC|Sunbow|Hasbro|Fox Kids|Columbia TriStar|Plus One|Film Roman",
+       channels: [app_faux_kids], auto: true}
+    - {rating_any: [TV-Y, TV-Y7, TV-G, TV-PG, "Not Rated", ""], channels: [app_faux_kids], fallback: true}
+
+  TV Shows:
+    - {studio: "HBO", channels: [app_hb_yo_min], auto: true}
+    - {studio: "Netflix", channels: [app_netflicks], auto: true}
+    - {studio: "FX Productions|FX Network", channels: [app_ef_x], auto: true}
+    - {studio: "Comedy Central", channels: [app_comedy_middle], auto: true}
+    - {studio: "New Metric|CBC|Crave|Bell Media|Showcase|Sunnyvale|S&S Productions|Shaftesbury",
+       channels: [app_cb_sea], auto: true}
+    - {studio: "BBC|Channel 4|ITV Studios|Talkback|Objective|Hat Trick|Avalon|Hartswood|Thames|Big Talk|Baby Cow",
+       channels: [app_bb_sea], auto: true}
+    - {studio: "Amazon", genres_any: [Action, Science Fiction, Sci-Fi & Fantasy, Fantasy], channels: [app_genre_superhero, app_sigh_fi]}
+    - {genres_any: [Science Fiction, Sci-Fi & Fantasy, Fantasy], channels: [app_sigh_fi]}
+    - {genres_any: [Horror], channels: [app_terror_channel]}
+    - {genres_any: [Documentary, Reality, True Crime], channels: [app_truth_tv]}
+    - {genres_any: [Comedy, Sitcom], rating_any: [TV-PG, TV-G], channels: [app_tee_bs, app_nb_sea]}
+    - {genres_any: [Comedy, Sitcom], rating_any: [TV-14, TV-MA], channels: [app_comedy_middle, app_ef_x]}
+
+# ---------------------------------------------------------------- movies (all automatic)
+movies:
+  stand_up_library: "Stand Up"            # whole library -> The Comedy Netwerk
+  stand_up_channel: app_comedy_middle
+  anime_library: "Anime Movies"
+  anime_channels: [app_munchyroll]
+  anime_classic_title: "Dragon Ball|Akira|Ghost in the Shell"
+  anime_classic_channel: app_tunami
+  documentary_library: "Documentary Movies"
+  documentary:
+    - {title: "Louis Theroux|Hated Family|Grizzly Man", channels: [app_truth_tv]}
+    - {title: "Dinosaur|Jurassic|Alien Planet|Prehistoric", channels: [app_national_geography]}
+    - {title: "South Park|Making of", channels: [app_comedy_middle]}
+    - {channels: [app_animal_globe]}
+  curated:   # checked first, in this order
+    - {title: "^(A Bug's Life|Aladdin|Cinderella|Fantasia|Finding Dory|Finding Nemo|Incredibles 2|Lady and the Tramp|Monsters, Inc\\.|Mulan|One Hundred and One Dalmatians|Pinocchio|Robin Hood|Sleeping Beauty|Snow White and the Seven Dwarfs|The Incredibles|The Jungle Book|The Lion King|The Little Mermaid|The Sword in the Stone|Toy Story.*|Up|WALL·E|Dinosaur|James and the Giant Peach|The Muppet Christmas Carol|The Nightmare Before Christmas|The Santa Clause.*|Home Alone.*|The Simpsons Movie)$",
+       channels: [app_dizzy_plus]}
+    - {studio: "Pixar|Walt Disney Animation|Walt Disney Pictures", channels: [app_dizzy_plus]}
+    - {title: "Ant-Man|Aquaman|Avengers|Batman|Birds of Prey|Black Adam|Black Panther|Black Widow|^Blade|Blue Beetle|Captain America|Captain Marvel|Dark Knight|Deadpool|Doctor Strange|Eternals|Fantastic Four|The Flash|Guardians of the Galaxy|Hellboy|Incredible Hulk|Iron Man|^Joker|Justice League|Kraven|Madame Web|Man of Steel|The Marvels|Morbius|Mystery Men|Shang-Chi|^Spawn$|Spider-Man|Suicide Squad|Supergirl|^Superman|^Thor|Thunderbolts|^Venom|Watchmen|Wonder Woman|^The Incredibles$|Incredibles 2|^The Avengers$|^The Mask$|X-Men|Wolverine|Shazam|Green Lantern|Daredevil|Punisher",
+       channels: [app_genre_superhero]}
+    - {title: "Godzilla|Kong|Pacific Rim|Cloverfield|Jurassic|Lost World|Tremors|Eight Legged Freaks|^Anaconda|^Troll|Primitive War|^65$|^The Mist$|Monster Hunter|Rampage|The Meg|Gamera",
+       channels: [app_genre_kaiju]}
+    - {title: "^Trailer Park Boys|^Fubar|Letterkenny|Goon", channels: [app_cb_sea]}
+    - {title: "Hot Fuzz|Shaun of the Dead|World's End|Wallace & Gromit|Chicken Run|Monty Python|Kingsman|The King's Man|Paddington",
+       channels: [app_bb_sea]}
+  # primary genre -> channel (first genre in Plex order that maps wins)
+  genre_primary:
+    Action: app_genre_action
+    Adventure: app_genre_action
+    Comedy: app_genre_comedy
+    Family: app_genre_family
+    Children: app_genre_family
+    Science Fiction: app_genre_scifi
+    SciFi: app_genre_scifi
+    Horror: app_terror_channel
+  kid_ratings_for_animation: [G, PG, TV-Y, TV-PG, Approved]
+  secondary:   # added when room remains
+    Horror: app_terror_channel
+    Science Fiction: app_genre_scifi
+    SciFi: app_genre_scifi
+    Crime|Thriller|Mystery: app_genre_thriller   # skipped for comedies
+  era:
+    - {year_max: 1989, channel: app_tcn}
+    - {year_min: 1990, year_max: 2005, channel: app_lackluster}
