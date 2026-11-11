@@ -48,13 +48,19 @@ Use your existing Plex token (the same one your other apps use) for `PLEX_TOKEN`
 - If it has a login, set `NTV_USERNAME` and `NTV_PASSWORD` to the Configure login.
 
 ### 4. Deploy in Dockge
-1. Create a new stack named `ntv-allocator`.
-2. Copy this whole folder into the stack directory (`/opt/stacks/ntv-allocator/`) so `compose.yaml`,
-   `Dockerfile`, `requirements.txt`, `rules.yaml` and `app/` sit side by side.
-3. Copy `.env.example` to `.env` and fill it in. Use your usual `PUID`/`PGID`.
-4. Create the folders `/mnt/Swimming/Sandboxes/docker/ntv-allocator/config` and `.../data`, owned by that user.
-5. Deploy. Leave `DRY_RUN=true` for the first run: it posts what it would do without changing anything.
+Every push to `main` builds `ghcr.io/d4rkm3ch/ntv-allocator:latest` with GitHub Actions
+(`.github/workflows/image.yml`), so the NAS only pulls an image.
+
+1. One-time registry login on the NAS, because the repository and its image are private. Create a GitHub
+   token (Settings > Developer settings > Personal access tokens > Tokens (classic)) with only `read:packages`,
+   then on the NAS shell: `docker login ghcr.io -u D4rkm3ch` and paste the token as the password.
+   (Alternatively, set the package to public under the repository's Packages; the image contains no secrets.)
+2. Create the folders `/mnt/Swimming/Sandboxes/docker/ntv-allocator/config` and `.../data`, owned by your PUID/PGID.
+3. In Dockge, create a stack named `ntv-allocator`, paste `compose.yaml`, and put the values from
+   `.env.example` in the stack's `.env` box.
+4. Deploy. Leave `DRY_RUN=true` for the first run: it posts what it would do without changing anything.
    When the Discord messages look right, set `DRY_RUN=false` and redeploy.
+5. To update later: Dockge > Update (pulls the new `latest`).
 
 ## Editing the rules
 

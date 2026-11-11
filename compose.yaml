@@ -1,13 +1,29 @@
 services:
   ntv-allocator:
-    build: .
+    image: ghcr.io/d4rkm3ch/ntv-allocator:latest
     container_name: ntv-allocator
     restart: unless-stopped
-    env_file: .env
+    user: ${PUID}:${PGID}
     environment:
       - TZ=Australia/Sydney
-    user: "${PUID}:${PGID}"
+      # Plex
+      - PLEX_URL=http://172.16.0.2:32400
+      - PLEX_TOKEN=${PLEX_TOKEN}
+      # NostalgiaTV (leave the login blank if Configure has no login set)
+      - NTV_URL=http://172.16.0.2:19850
+      - NTV_USERNAME=${NTV_USERNAME:-}
+      - NTV_PASSWORD=${NTV_PASSWORD:-}
+      - NTV_API_KEY=${NTV_API_KEY:-}
+      # Discord
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID}
+      - DISCORD_ALLOWED_USER_IDS=${DISCORD_ALLOWED_USER_IDS:-}
+      # Behaviour
+      - SCAN_INTERVAL_MINUTES=15
+      - LOOKBACK_DAYS=35
+      - DRY_RUN=true            # change to false once the Discord posts look right
+      - LOG_LEVEL=INFO
     volumes:
       - /mnt/Swimming/Sandboxes/docker/ntv-allocator/config:/config
       - /mnt/Swimming/Sandboxes/docker/ntv-allocator/data:/data
-    # Same Docker network as NostalgiaTV is not required; NTV_URL can use the NAS address.
+networks: {}
