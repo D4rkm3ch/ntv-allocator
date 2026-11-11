@@ -279,6 +279,64 @@ async def run_cleanup():
     check("clean-up: dry run asks nothing", len(ch.sent) == n)
     M.CFG["dry_run"] = False
 
+async def run_health():
+    from app.health import Health
+    import httpx
+    t = [0.0]
+    h = Health(threshold=3, remind_hours=6, clock=lambda: t[0])
+    h.fail("Plex", "is not reachable"); h.fail("Plex", "is not reachable")
+    check("health: no alert before 3 failures in a row", not h.outbox)
+    h.ok("Plex"); h.fail("Plex", "x"); h.fail("Plex", "x")
+    check("health: a success resets the count (brief blips stay quiet)", not h.outbox)
+    h.fail("Plex", "is not reachable at http://p")
+    check("health: alert after the 3rd failure in a row", len(h.outbox) == 1 and "Plex problem" in h.outbox[0])
+    t[0] += 3600; h.fail("Plex", "x")
+    check("health: no repeat within the reminder period", len(h.outbox) == 1)
+    t[0] += 6 * 3600; h.fail("Plex", "x")
+    check("health: reminder after 6 hours", len(h.outbox) == 2 and "still not working" in h.outbox[1])
+    h.ok("Plex")
+    check("health: one recovery message with the downtime", len(h.outbox) == 3 and "working again" in h.outbox[2] and "7 h" in h.outbox[2])
+    h.ok("Plex")
+    check("health: no further messages once recovered", len(h.outbox) == 3)
+
+    # through the allocator: probes fail, nothing scans, alert posted, recovery posted
+    a, ch = make([])
+    a.health = Health(threshold=3, remind_hours=6); a.profile_checked = True
+    state = {"plex": False}
+    async def pp():
+        if not state["plex"]:
+            raise httpx.ConnectError("refused")
+    async def np(): pass
+    a.plex.probe, a.ntv.probe = pp, np
+    scanned = []
+    async def scan(): scanned.append(1)
+    a.scan = scan
+    async def no_cleanup(): return []
+    a.cleanup = no_cleanup
+    for _ in range(3):
+        await a.run_once(); await a._flush_alerts()
+    check("health: no scan while Plex is down", not scanned)
+    check("health: Plex outage posted once to Discord", len(ch.sent) == 1 and "Plex problem" in ch.sent[0]["content"])
+    state["plex"] = True
+    await a.run_once(); await a._flush_alerts()
+    check("health: recovery posted and scanning resumes", len(ch.sent) == 2 and "working again" in ch.sent[1]["content"] and scanned)
+
+    # alert raised while Discord is down is delivered later
+    a.health.outbox.append("pending alert")
+    real = a._channel
+    async def broken(): raise RuntimeError("discord down")
+    a._channel = broken; await a._flush_alerts()
+    a._channel = real; await a._flush_alerts()
+    check("health: alert kept until Discord is back", ch.sent[-1]["content"] == "pending alert" and not a.health.outbox)
+
+    # scan errors: one is quiet, two in a row are reported
+    async def bad(): raise ValueError("bad data")
+    a.scan = bad; n = len(ch.sent)
+    await a.run_once(); await a._flush_alerts()
+    check("health: a single scan error is not reported", len(ch.sent) == n)
+    await a.run_once(); await a._flush_alerts()
+    check("health: two scan errors in a row are reported", len(ch.sent) == n + 1 and "Allocator scans problem" in ch.sent[-1]["content"])
+
 def run_profile():
     from app.clients import choose_profile
     check("profile: the only real profile is chosen (legacy blank entry ignored)",
@@ -302,5 +360,6 @@ async def _ret(v): return v
 asyncio.run(run())
 asyncio.run(run_cleanup())
 run_profile()
+asyncio.run(run_health())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

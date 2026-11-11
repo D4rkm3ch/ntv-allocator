@@ -30,6 +30,14 @@ class Plex:
         self.sections = {d["key"]: d for d in r.json()["MediaContainer"].get("Directory", [])}
         log.info("Plex %s, %d libraries", self.machine_id, len(self.sections))
 
+    async def probe(self) -> None:
+        """Raise unless Plex answers an authenticated request (first call also initialises)."""
+        if not self.machine_id:
+            await self.init()
+            return
+        r = await self.http.get(f"{self.url}/library/sections", headers=self.h)
+        r.raise_for_status()
+
     async def recently_added(self, days: int, libraries_ignored: set[str]) -> list[str]:
         """Rating keys of shows and movies added (or with new episodes) in the last `days` days."""
         keys: list[str] = []
@@ -107,6 +115,7 @@ class NostalgiaTV:
         self.profile_id = profile_id
         self.params = {"profileId": profile_id} if profile_id else {}
         self.http = httpx.AsyncClient(timeout=60)
+        self.ready = False
 
     @property
     def headers(self) -> dict[str, str]:
@@ -128,6 +137,14 @@ class NostalgiaTV:
             self.params = {"profileId": self.profile_id}
         log.info("NostalgiaTV reachable (login %s), profile %s",
                  "required" if needs_login else "not configured", self.profile_id)
+
+    async def probe(self) -> None:
+        """Raise unless NostalgiaTV answers an authenticated request (first call also initialises)."""
+        if not self.ready:
+            await self.init()
+            self.ready = True
+            return
+        await self._req("GET", "/api/profiles/")
 
     async def _req(self, method: str, path: str, **kw) -> Any:
         params = {**self.params, **kw.pop("params", {})}

@@ -55,6 +55,21 @@ after you delete it), one Discord message is posted for it:
   Raise the limit and restart for a deliberate large purge.
 - Set `CLEANUP=false` to turn it off. With `DRY_RUN=true` it only logs what it would ask.
 
+## Connection alerts
+
+Before every scan the allocator checks that Plex and NostalgiaTV answer an authenticated request.
+
+- A service failing 3 checks in a row (`ALERT_AFTER_FAILURES`) posts one alert, for example
+  "**Plex problem**: is not reachable at http://...". While anything is down it checks every minute
+  and does not scan.
+- It posts "**Plex is working again** (was down for 12 min)" on recovery, and a reminder every 6 hours
+  (`ALERT_REMIND_HOURS`) while a problem lasts.
+- Scan or clean-up errors with both servers up are retried quietly once; two in a row post an
+  "Allocator scans problem" alert, with details in the container log.
+- A rejected token or login is reported as such (HTTP 401/403).
+- Alerts raised while Discord is unreachable are posted once it is back. If the container itself stops,
+  nothing can post: watch the container with your usual monitoring for that.
+
 ## Setup
 
 ### 1. Discord bot (about 5 minutes)

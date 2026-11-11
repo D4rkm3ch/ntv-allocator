@@ -13,6 +13,7 @@ from collections import defaultdict
 import discord
 
 from .clients import NostalgiaTV, Plex
+from .health import Health, describe
 from .rules import Rules, Title
 from .state import State
 
@@ -50,6 +51,9 @@ class Allocator(discord.Client):
         self.titles: dict[str, Title] = {}
         self.missing_since: dict[str, float] = {}   # rating key -> first scan it was seen missing from Plex
         self.mass_warned = False
+        self.health = Health(threshold=int(env("ALERT_AFTER_FAILURES", "3")),
+                             remind_hours=float(env("ALERT_REMIND_HOURS", "6")))
+        self.profile_checked = False
 
     # ------------------------------------------------------------------ lifecycle
     async def setup_hook(self) -> None:
@@ -57,27 +61,7 @@ class Allocator(discord.Client):
             n = self.state.clear_dry_run()
             if n:
                 log.info("cleared %d dry-run decisions; they will be applied on this scan", n)
-        await self._connect("Plex", CFG["plex_url"], self.plex.init)
-        await self._connect("NostalgiaTV", CFG["ntv_url"], self.ntv.init)
-        n = self.state.switch_profile(self.ntv.profile_id)
-        if n:
-            log.info("NostalgiaTV profile is now %s; cleared %d earlier placement records so recent titles "
-                     "are re-checked against it", self.ntv.profile_id, n)
         self.loop.create_task(self._scan_loop())
-
-    @staticmethod
-    async def _connect(name: str, url: str, init) -> None:
-        """Retry until the server answers, with a readable log line instead of a crash loop."""
-        delay = 10
-        while True:
-            try:
-                await init()
-                return
-            except Exception as exc:
-                log.error("cannot reach %s at %s (%s: %s); retrying in %ds",
-                          name, url, type(exc).__name__, exc or "no response", delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 300)
 
     async def on_ready(self) -> None:
         log.info("Discord connected as %s", self.user)
@@ -86,23 +70,59 @@ class Allocator(discord.Client):
         ch = self.get_channel(CFG["discord_channel"]) or await self.fetch_channel(CFG["discord_channel"])
         return ch
 
+    async def _probe(self) -> bool:
+        """Check Plex and NostalgiaTV. Returns True when both answer."""
+        good = True
+        for name, url, probe in (("Plex", CFG["plex_url"], self.plex.probe),
+                                 ("NostalgiaTV", CFG["ntv_url"], self.ntv.probe)):
+            try:
+                await probe()
+                self.health.ok(name)
+            except Exception as exc:
+                reason = describe(exc, url)
+                log.error("%s check failed: %s", name, reason)
+                self.health.fail(name, reason)
+                good = False
+        if good and not self.profile_checked:
+            n = self.state.switch_profile(self.ntv.profile_id)
+            if n:
+                log.info("NostalgiaTV profile is now %s; cleared %d earlier placement records so recent titles "
+                         "are re-checked against it", self.ntv.profile_id, n)
+            self.profile_checked = True
+        return good
+
+    async def _flush_alerts(self) -> None:
+        while self.health.outbox:
+            try:
+                await (await self._channel()).send(self.health.outbox[0])
+            except Exception:
+                log.exception("could not post an alert to Discord; retrying next check")
+                return
+            self.health.outbox.pop(0)
+
+    async def run_once(self) -> bool:
+        """One cycle: check connections, then scan and clean up if both answer. Returns True when
+        the cycle ran normally (so the next one waits the full interval)."""
+        if not await self._probe():
+            return False
+        try:
+            await self.scan()
+            if CFG["cleanup"]:
+                await self.cleanup()
+            self.health.ok("Allocator scans")
+        except Exception as exc:
+            log.exception("scan or clean-up failed")
+            # a one-off error is retried quietly; two in a row is reported
+            self.health.fail("Allocator scans", describe(exc) + " (details in the container log)", threshold=2)
+        return True
+
     async def _scan_loop(self) -> None:
         await self.wait_until_ready()
         while not self.is_closed():
-            try:
-                await self.scan()
-            except Exception:
-                log.exception("scan failed")
-                try:
-                    await (await self._channel()).send("Allocator scan failed. See container logs for details.")
-                except Exception:
-                    log.exception("could not report failure to Discord")
-            if CFG["cleanup"]:
-                try:
-                    await self.cleanup()
-                except Exception:
-                    log.exception("clean-up failed; nothing was asked or removed this pass")
-            await asyncio.sleep(CFG["interval"] * 60)
+            healthy = await self.run_once()
+            await self._flush_alerts()
+            # while something is down, check every minute so recovery is noticed quickly
+            await asyncio.sleep(CFG["interval"] * 60 if healthy else 60)
 
     # ------------------------------------------------------------------ scanning
     async def scan(self) -> None:

@@ -25,6 +25,8 @@ services:
       - CLEANUP=true            # ask in Discord to remove titles deleted from Plex
       - CLEANUP_MAX_REMOVALS=50 # more missing at once = pause and warn instead of asking
       - DRY_RUN=false           # true = post what it would do without changing anything
+      - ALERT_AFTER_FAILURES=3  # failed checks in a row before a Discord alert (1 minute apart)
+      - ALERT_REMIND_HOURS=6    # reminder while a problem lasts
       - LOG_LEVEL=INFO
     volumes:
       - /mnt/Swimming/Sandboxes/docker/ntv-allocator/config:/config
