@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ import httpx
 from .rules import Title
 
 log = logging.getLogger("clients")
+CHANNEL_ID = re.compile(r"^(app_|custom_|user_local_)[A-Za-z0-9_]+$")
 
 
 class Plex:
@@ -96,23 +98,43 @@ class NostalgiaTV:
         return r.json() if r.content else None
 
     async def unassigned_keys(self) -> list[str]:
-        """Keys the server says no visible channel schedules (format-tolerant)."""
+        """Plex rating keys the server says no visible channel schedules."""
         data = await self._req("GET", "/api/content/unassigned")
-        items = data.get("items") or data.get("content") or data.get("unassigned") or [] if isinstance(data, dict) else data
-        out = []
-        for it in items or []:
-            k = it.get("ratingKey") or it.get("key") or it.get("id") if isinstance(it, dict) else it
-            if k:
-                out.append(str(k).split(":")[-1])
-        return out
+        keys: set[str] = set()
+
+        def walk(o):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    if k in ("ratingKey", "key", "qualifiedKey", "contentKey") and isinstance(v, (str, int)):
+                        tail = str(v).split(":")[-1]
+                        if tail.isdigit():
+                            keys.add(tail)
+                    else:
+                        walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+        walk(data)
+        return sorted(keys)
 
     async def channels_containing(self, qualified_key: str) -> list[str]:
+        """Visible channels whose config contains the title. Only strings shaped like channel
+        ids count, so an unexpected reply can never be mistaken for 'already has a home'."""
         data = await self._req("GET", "/api/content/channels-containing", params={"keys": qualified_key})
-        chans = data.get("channels", data) if isinstance(data, dict) else data
-        out = []
-        for c in chans or []:
-            out.append(c.get("stableId") or c.get("id") or c.get("channelId") if isinstance(c, dict) else str(c))
-        return [c for c in out if c]
+        found: list[str] = []
+
+        def walk(o):
+            if isinstance(o, dict):
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+            elif isinstance(o, str) and CHANNEL_ID.match(o) and o not in found:
+                found.append(o)
+        walk(data)
+        log.debug("channels-containing %s -> %s", qualified_key, found)
+        return found
 
     async def add_to_channel(self, channel_id: str, qualified_keys: list[str]) -> dict:
         return await self._req("POST", "/api/content/add-to-channel",

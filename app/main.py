@@ -48,9 +48,23 @@ class Allocator(discord.Client):
 
     # ------------------------------------------------------------------ lifecycle
     async def setup_hook(self) -> None:
-        await self.plex.init()
-        await self.ntv.init()
+        await self._connect("Plex", CFG["plex_url"], self.plex.init)
+        await self._connect("NostalgiaTV", CFG["ntv_url"], self.ntv.init)
         self.loop.create_task(self._scan_loop())
+
+    @staticmethod
+    async def _connect(name: str, url: str, init) -> None:
+        """Retry until the server answers, with a readable log line instead of a crash loop."""
+        delay = 10
+        while True:
+            try:
+                await init()
+                return
+            except Exception as exc:
+                log.error("cannot reach %s at %s (%s: %s); retrying in %ds",
+                          name, url, type(exc).__name__, exc or "no response", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 300)
 
     async def on_ready(self) -> None:
         log.info("Discord connected as %s", self.user)
