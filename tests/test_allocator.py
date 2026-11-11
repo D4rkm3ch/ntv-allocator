@@ -104,8 +104,10 @@ async def run():
     check("one question posted (The Office)", len(q) == 1 and q[0]["embed"].title == "The Office (US) (2005)")
     sel = q[0]["view"].children[0]
     defaults = [o.value for o in sel.options if o.default]
-    check("picker pre-selects the three suggestions and lists them first",
-          defaults == ["app_comedy_middle","app_nb_sea","app_ef_x"] and [o.value for o in sel.options[:3]] == defaults)
+    labels = [o.label for o in sel.options]
+    norm = [l.casefold()[4:] if l.casefold().startswith("the ") else l.casefold() for l in labels]
+    check("picker pre-selects the three suggestions and lists every option alphabetically",
+          set(defaults) == {"app_comedy_middle","app_nb_sea","app_ef_x"} and norm == sorted(norm))
     check("picker max is 3 and has <= 25 options", sel.max_values == 3 and len(sel.options) <= 25)
 
     # unassigned report must not delete or re-post an open question

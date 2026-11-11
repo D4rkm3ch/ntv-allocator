@@ -103,8 +103,9 @@ class Rules:
         return out[: self.max]
 
     def channel_choices(self, t: Title, first: list[str] | None = None) -> list[tuple[str, str]]:
-        """Channels offered in the Discord picker (Discord allows 25). Suggested channels come first
-        so they are always present."""
+        """Channels offered in the Discord picker (Discord allows 25). Suggested channels, then the
+        groups most relevant to the title, decide which 25 are offered; they are shown alphabetically,
+        ignoring a leading "The" (as Plex sorts)."""
         if t.kind == "movie":
             order = ["movies", "adult_tv", "documentary", "anime", "kids"]
         elif t.library == "Anime":
@@ -118,7 +119,10 @@ class Rules:
         out: list[tuple[str, str]] = [(c, self.names[c]) for c in (first or []) if c in self.names]
         for g in order:
             out.extend(item for item in self.groups.get(g, {}).items() if item not in out)
-        return out[:25]
+        def key(item: tuple[str, str]) -> str:
+            n = item[1].casefold()
+            return n[4:] if n.startswith("the ") else n
+        return sorted(out[:25], key=key)
 
     # ------------------------------------------------------------------ placement
     def place(self, t: Title) -> Placement:
