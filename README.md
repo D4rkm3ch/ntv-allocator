@@ -3,12 +3,12 @@
 Watches Plex and NostalgiaTV, finds shows and movies that have no permanent channel, and places them.
 Confident placements happen automatically; anything uncertain is posted to a Discord channel with a
 channel picker. Your choice is applied as soon as you press Approve. Titles you delete from Plex are
-removed from channel lists automatically (logged only, never posted).
+offered for removal from their channels, one Discord question per show or movie.
 
 ## What it does and does not do
 
 - Only adds titles to channels that already exist. It never creates, hides, renames, renumbers or
-  removes channels. The only removal it makes is the clean-up of titles deleted from Plex (below).
+  removes channels. The only removal it makes is a title you deleted from Plex, after you press Remove (below).
 - New episodes of shows you already have need nothing: channels hold whole shows.
 - A title only on a seasonal channel counts as unplaced.
 - Before every change it takes a NostalgiaTV config backup (`/api/config/backups/create`), then
@@ -30,24 +30,30 @@ removed from channel lists automatically (logged only, never posted).
 4. In Discord, adjust the selection (up to 3 channels) and press **Approve**, or press
    **Skip for now** to decide later. A skipped title that still has no channel after `REASK_DAYS`
    (default 30) is asked about again, once. Open questions are never re-posted.
-5. Clean-up: titles deleted from Plex are removed from every channel's manual list (see below).
+5. Clean-up: titles deleted from Plex are offered for removal in Discord (see below).
 
 ## Clean-up of deleted titles
 
-After each scan, every channel's manual list is compared with Plex. A title is removed from all its
-channels when it is missing from every Plex library listing **and** Plex answers "not found" for it, on
-two consecutive scans (so about 15 minutes after you delete it). Removals go to the container log only.
+After each scan, every channel's manual list is compared with Plex. When a title is missing from every
+Plex library listing **and** Plex answers "not found" for it on two consecutive scans (about 15 minutes
+after you delete it), one Discord message is posted for it:
 
+> **Deleted from Plex: X-Men (2000)**
+> Still on: Superhero, Action, Lackluster
+> Remove it from these channels?  [Remove] [Keep]
+
+- One question per show or per movie. Channels hold whole shows, so a deleted show is one question no
+  matter how many episodes it had, and deleting some episodes of a show that is still in Plex needs
+  nothing. Deleting three movies gives three questions.
+- **Remove** takes it off every listed channel (after a config backup) and refreshes only those channels.
+  **Keep** leaves it and never asks about that title again.
+- If the title comes back to Plex before you answer, the question is closed automatically.
 - Only keys from your Plex server are checked; NostalgiaTV's own local media is never touched.
-- If Plex errors during the check, nothing is removed that pass.
-- If more than `CLEANUP_MAX_REMOVALS` (default 50) titles would go in one pass, nothing is removed and a
-  warning is logged: that usually means a library or drive is unmounted. Raise the limit for a big purge.
-- A backup is taken before removing, and only the affected channels are refreshed.
-- Set `CLEANUP=false` to turn it off. With `DRY_RUN=true` it only logs what it would remove.
-
-Validated against the line-up built on 2026-11-11: 113 of 171 shows and 561 of 564 movies would be
-placed automatically, and 1 automatic show placement (Bump in the Night: Faux Kids instead of ITV) differs
-from the hand allocation. Everything else goes to Discord.
+- If Plex errors during the check, nothing is asked that pass.
+- If more than `CLEANUP_MAX_REMOVALS` (default 50) titles go missing at once, no questions are posted and
+  a single "Clean-up paused" message explains why: that usually means a library or drive is unmounted.
+  Raise the limit and restart for a deliberate large purge.
+- Set `CLEANUP=false` to turn it off. With `DRY_RUN=true` it only logs what it would ask.
 
 ## Setup
 

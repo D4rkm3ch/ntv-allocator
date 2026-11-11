@@ -22,8 +22,8 @@ services:
       - SCAN_INTERVAL_MINUTES=15
       - LOOKBACK_DAYS=35
       - REASK_DAYS=30           # a skipped title is asked about again after this many days
-      - CLEANUP=true            # remove titles deleted from Plex from channel lists (log only)
-      - CLEANUP_MAX_REMOVALS=50 # safety limit per pass
+      - CLEANUP=true            # ask in Discord to remove titles deleted from Plex
+      - CLEANUP_MAX_REMOVALS=50 # more missing at once = pause and warn instead of asking
       - DRY_RUN=false           # true = post what it would do without changing anything
       - LOG_LEVEL=INFO
     volumes:

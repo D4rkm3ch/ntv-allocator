@@ -15,6 +15,9 @@ class State:
         self.db.execute("""CREATE TABLE IF NOT EXISTS done (
             key TEXT PRIMARY KEY, label TEXT, channels TEXT, how TEXT, at REAL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS skipped (key TEXT PRIMARY KEY, label TEXT, at REAL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS labels (key TEXT PRIMARY KEY, label TEXT)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS removals (
+            key TEXT PRIMARY KEY, label TEXT, pairs TEXT, status TEXT, message_id TEXT, at REAL)""")
         self.db.commit()
 
     # pending ---------------------------------------------------------------
@@ -71,3 +74,58 @@ class State:
         self.db.execute("DELETE FROM skipped WHERE key=? AND at < ?",
                         (key, time.time() - skip_older_than_days * 86400))
         self.db.commit()
+
+    # clean-up of titles deleted from Plex ---------------------------------
+    def remember_labels(self, labels: dict[str, str]) -> None:
+        self.db.executemany("INSERT OR REPLACE INTO labels VALUES (?,?)", list(labels.items()))
+        self.db.commit()
+
+    def label_for(self, key: str) -> str:
+        for q in ("SELECT label FROM labels WHERE key=?", "SELECT label FROM done WHERE key=?",
+                  "SELECT label FROM skipped WHERE key=?"):
+            row = self.db.execute(q, (key,)).fetchone()
+            if row and row[0] and row[0] != key:
+                return row[0]
+        return ""
+
+    def add_removal(self, key: str, label: str, pairs: list[tuple[str, str]]) -> None:
+        self.db.execute("INSERT OR REPLACE INTO removals VALUES (?,?,?,?,?,?)",
+                        (key, label, json.dumps(pairs), "pending", None, time.time()))
+        self.db.commit()
+
+    def get_removal(self, key: str) -> dict | None:
+        row = self.db.execute("SELECT key,label,pairs,status,message_id FROM removals WHERE key=?", (key,)).fetchone()
+        if not row:
+            return None
+        return {"key": row[0], "label": row[1], "pairs": [tuple(p) for p in json.loads(row[2])],
+                "status": row[3], "message_id": row[4]}
+
+    def removal_status(self, key: str) -> str:
+        """'pending' or 'kept' blocks a new question; a 'removed' title still listed is asked again."""
+        r = self.get_removal(key)
+        return r["status"] if r and r["status"] in ("pending", "kept") else ""
+
+    def set_removal_message(self, key: str, message_id: int) -> None:
+        self.db.execute("UPDATE removals SET message_id=? WHERE key=?", (str(message_id), key))
+        self.db.commit()
+
+    def set_removal_status(self, key: str, status: str) -> None:
+        self.db.execute("UPDATE removals SET status=? WHERE key=?", (status, key))
+        self.db.commit()
+
+    def set_removal_pairs(self, key: str, pairs: list[tuple[str, str]]) -> None:
+        self.db.execute("UPDATE removals SET pairs=? WHERE key=?", (json.dumps(pairs), key))
+        self.db.commit()
+
+    def drop_removal(self, key: str) -> None:
+        self.db.execute("DELETE FROM removals WHERE key=?", (key,))
+        self.db.commit()
+
+    def drop_removal_questions_except(self, still_missing: set[str]) -> list[tuple[str, str, str | None]]:
+        """Open questions for titles that are back in Plex are void; returns (key, label, message_id)."""
+        rows = self.db.execute("SELECT key,label,message_id FROM removals WHERE status='pending'").fetchall()
+        back = [r for r in rows if r[0] not in still_missing]
+        for r in back:
+            self.db.execute("DELETE FROM removals WHERE key=?", (r[0],))
+        self.db.commit()
+        return back

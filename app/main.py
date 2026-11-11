@@ -49,6 +49,7 @@ class Allocator(discord.Client):
         self.lock = asyncio.Lock()
         self.titles: dict[str, Title] = {}
         self.missing_since: dict[str, float] = {}   # rating key -> first scan it was seen missing from Plex
+        self.mass_warned = False
 
     # ------------------------------------------------------------------ lifecycle
     async def setup_hook(self) -> None:
@@ -96,7 +97,7 @@ class Allocator(discord.Client):
                 try:
                     await self.cleanup()
                 except Exception:
-                    log.exception("clean-up failed; nothing was removed this pass")
+                    log.exception("clean-up failed; nothing was asked or removed this pass")
             await asyncio.sleep(CFG["interval"] * 60)
 
     # ------------------------------------------------------------------ scanning
@@ -126,13 +127,16 @@ class Allocator(discord.Client):
                 await self.apply(auto, how="auto")
             await self._post_unsent()
 
-    async def cleanup(self) -> list[tuple[str, str]]:
-        """Remove titles that have left Plex from channel manual lists. Logged only, never posted.
+    async def cleanup(self) -> list[str]:
+        """Find titles that have left Plex but are still on channel manual lists, and ask in Discord
+        whether to remove them: one question per show or movie (channels hold whole shows, so a
+        deleted show is one question however many episodes it had; deleting some episodes of a show
+        that is still in Plex needs nothing).
 
         Safeguards: only keys from this Plex server are considered; a key must be missing from
-        every library listing AND answer 404 on two consecutive passes; a pass that would remove
-        more than CLEANUP_MAX_REMOVALS titles removes nothing (a library may be unmounted).
-        Returns the (channel, stored key) pairs removed."""
+        every library listing AND answer 404 on two consecutive passes; a pass that finds more than
+        CLEANUP_MAX_REMOVALS new titles asks nothing (a library may be unmounted).
+        Returns the rating keys asked about this pass."""
         async with self.lock:
             lists = await self.ntv.manual_lists()
             prefix = f"{self.plex.machine_id}:"
@@ -141,7 +145,9 @@ class Allocator(discord.Client):
                 for s in stored:
                     if s.startswith(prefix) and s[len(prefix):].isdigit():
                         listed[s[len(prefix):]].append((ch, s))
-            present = await self.plex.library_keys()
+            present = await self.plex.library_index()
+            # remember names while titles exist, so a deleted title can still be named
+            self.state.remember_labels({k: v for k, v in present.items() if k in listed})
             gone = []
             for key in sorted(k for k in listed if k not in present):
                 if not await self.plex.exists(key):
@@ -149,40 +155,113 @@ class Allocator(discord.Client):
             now = asyncio.get_running_loop().time()
             # forget anything that came back; remember first sighting of new ones
             self.missing_since = {k: self.missing_since.get(k, now) for k in gone}
-            confirmed = [k for k in gone if self.missing_since[k] < now]
+            for key, label, mid in self.state.drop_removal_questions_except(set(gone)):
+                log.info("clean-up: %s is back in Plex; closing its removal question", label)
+                if mid:
+                    try:
+                        ch = await self._channel()
+                        msg = await ch.fetch_message(int(mid))
+                        await msg.edit(content=f"**{label}** is back in Plex; nothing to remove.", view=None)
+                    except Exception:
+                        log.warning("could not update the removal question for %s", label)
             if not gone:
                 return []
-            log.info("clean-up: %d title(s) missing from Plex, %d confirmed on a second pass",
-                     len(gone), len(confirmed))
-            if len(confirmed) > CFG["cleanup_max"]:
-                log.warning("clean-up: %d titles would be removed, above CLEANUP_MAX_REMOVALS=%d; removing "
-                            "nothing. Check that every Plex library is mounted, or raise the limit.",
-                            len(confirmed), CFG["cleanup_max"])
+            confirmed = [k for k in gone if self.missing_since[k] < now]
+            new = [k for k in confirmed if not self.state.removal_status(k)]
+            log.info("clean-up: %d title(s) missing from Plex, %d confirmed, %d new", len(gone), len(confirmed), len(new))
+            if not new:
                 return []
-            removed: list[tuple[str, str]] = []
-            if not confirmed:
-                return removed
+            if len(new) > CFG["cleanup_max"]:
+                log.warning("clean-up: %d titles missing, above CLEANUP_MAX_REMOVALS=%d; asking nothing.",
+                            len(new), CFG["cleanup_max"])
+                if not self.mass_warned:
+                    self.mass_warned = True
+                    await (await self._channel()).send(
+                        f"**Clean-up paused**: {len(new)} titles on channel lists are missing from Plex at once. "
+                        f"That usually means a library or drive is unmounted, so nothing will be asked or removed. "
+                        f"If the deletion was deliberate, raise CLEANUP_MAX_REMOVALS and restart.")
+                return []
+            self.mass_warned = False
+            labels = await self._removed_labels(new)
             if CFG["dry_run"]:
-                for k in confirmed:
-                    log.info("DRY RUN, would remove rating key %s from %s", k, [c for c, _ in listed[k]])
-                return removed
-            await self.ntv.backup()
-            touched: set[str] = set()
-            for k in confirmed:
-                for ch, stored in listed[k]:
+                for k in new:
+                    log.info("DRY RUN, would ask to remove %s from %s", labels[k], [c for c, _ in listed[k]])
+                return []
+            for k in new:
+                self.state.add_removal(k, labels[k], listed[k])
+                try:
+                    await self._post_removal(k)
+                except Exception:
+                    log.exception("could not post removal question for %s", labels[k])
+            return new
+
+    async def _removed_labels(self, keys: list[str]) -> dict[str, str]:
+        """Names for titles Plex no longer has: remembered names, then NostalgiaTV's content cache,
+        then the allocator's own records."""
+        out = {k: self.state.label_for(k) for k in keys}
+        missing = [k for k in keys if not out[k]]
+        if missing:
+            try:
+                for k, lbl in (await self.ntv.labels([self.plex.qualified(k) for k in missing])).items():
+                    out[k.split(":")[-1]] = out.get(k.split(":")[-1]) or lbl
+            except Exception:
+                log.warning("could not read titles from NostalgiaTV for %s", missing)
+        return {k: out.get(k) or f"Unknown title (rating key {k})" for k in keys}
+
+    async def _post_removal(self, key: str) -> None:
+        r = self.state.get_removal(key)
+        names = self._names([c for c, _ in r["pairs"]])
+        v = discord.ui.View(timeout=None)
+        v.add_item(discord.ui.Button(custom_id=f"ntva:rm:{key}", label="Remove", style=discord.ButtonStyle.danger))
+        v.add_item(discord.ui.Button(custom_id=f"ntva:keep:{key}", label="Keep", style=discord.ButtonStyle.secondary))
+        msg = await (await self._channel()).send(
+            f"**Deleted from Plex: {r['label']}**\nStill on: {names}\nRemove it from these channels?", view=v)
+        self.state.set_removal_message(key, msg.id)
+
+    async def _answer_removal(self, it: discord.Interaction, action: str, key: str) -> None:
+        r = self.state.get_removal(key)
+        if not r or r["status"] != "pending":
+            await it.response.send_message("This title has already been handled.", ephemeral=True)
+            return
+        if action == "keep":
+            self.state.set_removal_status(key, "kept")
+            await it.response.edit_message(content=f"**{r['label']}**: kept on {self._names([c for c, _ in r['pairs']])}. "
+                                                   f"It will not be asked about again.", view=None)
+            return
+        await it.response.defer()
+        try:
+            async with self.lock:
+                if await self.plex.exists(key):
+                    self.state.drop_removal(key)
+                    await it.message.edit(content=f"**{r['label']}** is back in Plex; nothing removed.", view=None)
+                    return
+                await self.ntv.backup()
+                done, failed = [], []
+                for ch, stored in r["pairs"]:
                     try:
                         await self.ntv.remove_from_channel(ch, stored)
-                        removed.append((ch, stored))
-                        touched.add(ch)
-                        log.info("clean-up: removed rating key %s (no longer in Plex) from %s",
-                                 k, self.rules.names.get(ch, ch))
+                        done.append(ch)
+                        log.info("clean-up: removed %s from %s (approved by %s)", r["label"],
+                                 self.rules.names.get(ch, ch), it.user.name)
                     except Exception:
-                        log.exception("clean-up: could not remove %s from %s; retried next pass", stored, ch)
-                if all(pair in removed for pair in listed[k]):
-                    self.missing_since.pop(k, None)
-            for ch in touched:
-                await self.ntv.refresh_channel(ch)
-            return removed
+                        log.exception("clean-up: could not remove %s from %s", r["label"], ch)
+                        failed.append(ch)
+                for ch in done:
+                    await self.ntv.refresh_channel(ch)
+        except Exception as exc:
+            log.exception("removal of %s failed", r["label"])
+            await it.followup.send(f"Could not remove this ({type(exc).__name__}). Nothing was recorded; "
+                                   f"press Remove again to retry, or check the container logs.", ephemeral=True)
+            return
+        if failed:
+            # keep the question open for the channels that failed
+            self.state.set_removal_pairs(key, [(c, s) for c, s in r["pairs"] if c in failed])
+            await it.followup.send(f"Removed from {self._names(done)}; failed on {self._names(failed)}. "
+                                   f"Press Remove again to retry.", ephemeral=True)
+            return
+        self.state.set_removal_status(key, "removed")
+        self.missing_since.pop(key, None)
+        await it.message.edit(content=f"**{r['label']}**: removed from {self._names(done)}.", view=None)
 
     async def _evaluate(self, key: str, config_homes: dict, manual: set, hidden: set, auto: dict) -> None:
         t = await self.plex.title(key)
@@ -317,6 +396,9 @@ class Allocator(discord.Client):
             await it.response.send_message("You are not permitted to make allocation decisions.", ephemeral=True)
             return
         _, action, key = cid.split(":", 2)
+        if action in ("rm", "keep"):
+            await self._answer_removal(it, action, key)
+            return
         pend = self.state.get_pending(key)
         if not pend:
             await it.response.send_message("This title has already been handled.", ephemeral=True)

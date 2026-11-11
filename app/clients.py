@@ -61,18 +61,19 @@ class Plex:
     def qualified(self, key: str) -> str:
         return f"{self.machine_id}:{key}"
 
-    async def library_keys(self) -> set[str]:
-        """Rating keys of every show and movie in every library. Raises if any library cannot be
-        read, so a partial answer can never make titles look deleted."""
-        keys: set[str] = set()
+    async def library_index(self) -> dict[str, str]:
+        """Rating key -> "Title (Year)" for every show and movie in every library. Raises if any
+        library cannot be read, so a partial answer can never make titles look deleted."""
+        out: dict[str, str] = {}
         for sid, sec in self.sections.items():
             if sec["type"] not in ("show", "movie"):
                 continue
             t = 1 if sec["type"] == "movie" else 2
             r = await self.http.get(f"{self.url}/library/sections/{sid}/all?type={t}", headers=self.h)
             r.raise_for_status()
-            keys |= {str(m["ratingKey"]) for m in r.json()["MediaContainer"].get("Metadata", [])}
-        return keys
+            for m in r.json()["MediaContainer"].get("Metadata", []):
+                out[str(m["ratingKey"])] = f"{m.get('title', '')} ({m['year']})" if m.get("year") else m.get("title", "")
+        return out
 
     async def exists(self, key: str) -> bool:
         """False only when Plex answers 404 for the item; any other failure raises."""
@@ -168,6 +169,18 @@ class NostalgiaTV:
             if c.get("stableId") and c.get("customMediaRatingKeys"):
                 lists[c["stableId"]] = [str(k) for k in c["customMediaRatingKeys"]]
         return lists
+
+    async def labels(self, qualified_keys: list[str]) -> dict[str, str]:
+        """Titles from NostalgiaTV's content cache (it may still know a title Plex has deleted)."""
+        data = await self._req("POST", "/api/content/by-keys", json={"keys": qualified_keys})
+        out: dict[str, str] = {}
+        for it in (data or {}).get("items") or []:
+            k = str(it.get("ratingKey") or it.get("rating_key") or it.get("key") or "")
+            title = it.get("title") or ""
+            year = it.get("year")
+            if k and title:
+                out[k] = f"{title} ({year})" if year else title
+        return out
 
     async def remove_from_channel(self, channel_id: str, stored_key: str) -> None:
         await self._req("POST", "/api/watch/remove-from-channel",

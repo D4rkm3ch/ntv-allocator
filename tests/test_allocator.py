@@ -154,65 +154,112 @@ async def run():
 
 async def run_cleanup():
     M.CFG["dry_run"] = False
+    os.environ["STATE_PATH"] = tmp + "/c.db"; M.CFG["state"] = tmp + "/c.db"
     a, ch = make([])
+    a.state = M.State(tmp + "/c.db")
     lists = {"app_genre_action": ["MID:1", "MID:7", "MID:8"], "app_genre_superhero": ["MID:1"],
-             "app_ntv": ["local:abc:ff01"], "app_ef_x": ["OTHER:1", "MID:2"]}
-    in_plex = {"7", "8", "2"}          # X-Men (1) deleted
-    plex_404 = {"1"}
+             "app_ntv": ["local:abc:ff01"], "app_ef_x": ["OTHER:1", "MID:2", "MID:20"]}
+    plex = {"1": "X-Men (2000)", "7": "Seven (1995)", "8": "Eight (2001)", "2": "The Office (US) (2005)",
+            "20": "Twenty (2020)"}
+    plex_404 = set()
     removed = []
     a.ntv.manual_lists = lambda: _ret({c: list(v) for c, v in lists.items()})
     async def rm(c, k):
         removed.append((c, k)); lists[c].remove(k)
     a.ntv.remove_from_channel = rm
-    a.plex.library_keys = lambda: _ret(set(in_plex))
+    a.ntv.labels = lambda keys: _ret({"MID:99": "Ninety Nine (1999)"})
+    a.plex.library_index = lambda: _ret(dict(plex))
     async def exists(k): return k not in plex_404
     a.plex.exists = exists
     a.plex.machine_id = "MID"
+    edits = {}
+    async def fetch_message(mid):
+        class Msg:
+            async def edit(self, **kw): edits[mid] = kw.get("content")
+        return Msg()
+    ch.fetch_message = fetch_message
+    def delete(k): plex.pop(k, None); plex_404.add(k)
+    def restore(k, lbl): plex[k] = lbl; plex_404.discard(k)
+    questions = lambda: [m for m in ch.sent if m["view"] is not None]
 
+    await a.cleanup()                       # all present: names remembered, nothing asked
+    check("clean-up: nothing asked while everything is in Plex", not ch.sent)
+    delete("1"); delete("20")               # a movie on two channels, and a show
     await a.cleanup()
-    check("clean-up: nothing removed on the first sighting", not removed)
+    check("clean-up: nothing asked on the first sighting", not ch.sent)
     await a.cleanup()
-    check("clean-up: deleted title removed from every channel on the second pass",
+    q = questions()
+    check("clean-up: one question per title (2 titles, 3 channel entries -> 2 questions)", len(q) == 2)
+    xq = [m for m in q if "X-Men (2000)" in m["content"]]
+    check("clean-up: question names the title and every channel it is on",
+          xq and "Action" in xq[0]["content"] and "Superhero" in xq[0]["content"])
+    check("clean-up: nothing removed before an answer", not removed)
+    check("clean-up: NTV local keys and other-server keys never asked about",
+          not any("local:" in m["content"] or "OTHER" in m["content"] for m in ch.sent))
+    await a.cleanup()
+    check("clean-up: open questions are not re-posted", len(questions()) == 2)
+
+    a.ntv.calls.clear()
+    i = Inter("ntva:rm:1"); await a.on_interaction(i)
+    check("clean-up: Remove takes the title off every channel",
           sorted(removed) == [("app_genre_action", "MID:1"), ("app_genre_superhero", "MID:1")])
-    check("clean-up: NTV local keys and other-server keys untouched",
-          lists["app_ntv"] == ["local:abc:ff01"] and "OTHER:1" in lists["app_ef_x"])
-    check("clean-up: backup taken and touched channels refreshed",
+    check("clean-up: Remove takes a backup and refreshes the touched channels",
           ("backup",) in a.ntv.calls and {c[1] for c in a.ntv.calls if c[0] == "refresh"} == {"app_genre_action", "app_genre_superhero"})
-    check("clean-up: nothing posted to Discord", not ch.sent)
+    check("clean-up: Remove edits the post", any(isinstance(x, tuple) and x[0] == "edit" and "removed from" in (x[1] or "") for x in i.log))
+    i = Inter("ntva:rm:1"); await a.on_interaction(i)
+    check("clean-up: second press says already handled", ("msg", "This title has already been handled.") in i.log)
 
-    # missing from the listing but Plex still answers the lookup: keep
-    removed.clear(); in_plex.discard("7")
+    removed.clear()
+    i = Inter("ntva:keep:20"); await a.on_interaction(i)
+    check("clean-up: Keep removes nothing", not removed and a.state.get_removal("20")["status"] == "kept")
+    n = len(ch.sent); await a.cleanup(); await a.cleanup()
+    check("clean-up: a kept title is never asked about again", len(ch.sent) == n)
+
+    # unknown name falls back to NostalgiaTV's content cache
+    lists["app_tcn"] = ["MID:99"]; plex_404.add("99")
     await a.cleanup(); await a.cleanup()
-    check("clean-up: title missing from listing but still found by lookup is kept", not removed)
+    check("clean-up: name from NostalgiaTV when Plex no longer knows it",
+          any("Ninety Nine (1999)" in (m["content"] or "") for m in questions()))
 
-    # a title that disappears for one pass then comes back is never removed
-    in_plex.add("7"); in_plex.discard("8"); plex_404.add("8")
-    await a.cleanup(); in_plex.add("8"); plex_404.discard("8"); await a.cleanup()
-    in_plex.discard("8"); plex_404.add("8"); await a.cleanup()
-    check("clean-up: a title that came back resets its confirmation", not removed)
-    in_plex.add("8"); plex_404.discard("8")
+    # title comes back while its question is open
+    delete("8"); await a.cleanup(); await a.cleanup()
+    q8 = a.state.get_removal("8")
+    restore("8", "Eight (2001)"); await a.cleanup()
+    check("clean-up: a title back in Plex closes its open question",
+          a.state.get_removal("8") is None and "back in Plex" in (edits.get(int(q8["message_id"])) or ""))
 
-    # Plex error during confirmation: nothing removed, error raised (logged by the loop)
+    # Remove pressed after the title came back (before the next pass noticed)
+    delete("7"); await a.cleanup(); await a.cleanup()
+    plex_404.discard("7"); removed.clear()
+    i = Inter("ntva:rm:7"); await a.on_interaction(i)
+    check("clean-up: Remove on a title that is back in Plex removes nothing", not removed)
+    plex["7"] = "Seven (1995)"
+
+    # Plex error during the check: nothing asked
     async def boom(k): raise RuntimeError("plex down")
-    a.plex.exists = boom; in_plex.discard("2")
+    a.plex.exists = boom; plex.pop("2")
+    n = len(ch.sent)
     try:
         await a.cleanup(); raised = False
     except RuntimeError:
         raised = True
-    check("clean-up: a Plex error aborts the pass without removing anything", raised and not removed)
-    a.plex.exists = exists; in_plex.add("2")
+    check("clean-up: a Plex error aborts the pass without asking anything", raised and len(ch.sent) == n)
+    a.plex.exists = exists; plex["2"] = "The Office (US) (2005)"
 
-    # mass disappearance (unmounted library) is refused
-    big = {f"app_genre_comedy": [f"MID:{n}" for n in range(1000, 1100)]}
-    lists.update(big); plex_404.update(str(n) for n in range(1000, 1100))
-    await a.cleanup(); await a.cleanup()
-    check("clean-up: more than CLEANUP_MAX_REMOVALS missing removes nothing", not removed)
+    # mass disappearance: one warning, no questions, not repeated
+    lists["app_genre_comedy"] = [f"MID:{k}" for k in range(1000, 1100)]
+    plex_404.update(str(k) for k in range(1000, 1100))
+    n = len(ch.sent); await a.cleanup(); await a.cleanup(); await a.cleanup()
+    new = ch.sent[n:]
+    check("clean-up: over CLEANUP_MAX_REMOVALS posts one warning and no questions",
+          len(new) == 1 and new[0]["view"] is None and "paused" in new[0]["content"])
+    lists.pop("app_genre_comedy")
 
-    # dry run removes nothing
-    lists.pop("app_genre_comedy"); lists["app_tcn"] = ["MID:55"]; plex_404.add("55")
-    M.CFG["dry_run"] = True
+    # dry run posts nothing
+    lists["app_lackluster"] = ["MID:55"]; plex_404.add("55")
+    M.CFG["dry_run"] = True; n = len(ch.sent)
     await a.cleanup(); await a.cleanup()
-    check("clean-up: dry run removes nothing", not removed)
+    check("clean-up: dry run asks nothing", len(ch.sent) == n)
     M.CFG["dry_run"] = False
 
 async def _ret(v): return v
