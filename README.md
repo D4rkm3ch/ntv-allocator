@@ -70,6 +70,8 @@ after you delete it), one Discord message is posted for it:
 Use your existing Plex token (the same one your other apps use) for `PLEX_TOKEN`.
 
 ### 3. NostalgiaTV access
+- Profile: with one profile (the usual case) it is found automatically and used for every call. With
+  several, set `NTV_PROFILE_ID`; the start-up log lists the IDs if it cannot decide.
 - If Configure has no login set (open mode), leave `NTV_API_KEY`, `NTV_USERNAME` and `NTV_PASSWORD` blank.
 - If it has a login, set `NTV_USERNAME` and `NTV_PASSWORD` to the Configure login.
 
@@ -105,6 +107,10 @@ which is not in the catalogue stops the container with a clear error instead of 
   (`python tests/test_allocator.py`)
 
 ## Notes
+
+- Fixed in v1.3: earlier versions sent no profile ID, so NostalgiaTV put placements on a legacy internal
+  profile instead of yours. On first start, v1.3 forgets those records and re-checks recent titles,
+  placing them on your real profile.
 
 - Verified live on 2026-11-11: X-Men placed automatically (Superhero, Action, Lackluster); The Office (US)
   approved through Discord.

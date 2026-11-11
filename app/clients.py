@@ -84,11 +84,27 @@ class Plex:
         return True
 
 
+def choose_profile(data) -> str:
+    """Pick the profile to work on from /api/profiles/: the only real profile, else the one marked
+    active. Raises when that cannot be decided, so the allocator never writes to the wrong profile
+    (without a profileId NostalgiaTV writes to a legacy internal profile nobody watches)."""
+    ps = data.get("profiles", data) if isinstance(data, dict) else data
+    real = [p for p in ps or [] if isinstance(p, dict) and p.get("id")]
+    if len(real) == 1:
+        return str(real[0]["id"])
+    active = [p for p in real if p.get("active") or p.get("isActive") or p.get("current")]
+    if len(active) == 1:
+        return str(active[0]["id"])
+    names = ", ".join(f"{p.get('name')} = {p.get('id')}" for p in real) or "none found"
+    raise RuntimeError(f"cannot tell which NostalgiaTV profile to use; set NTV_PROFILE_ID to one of: {names}")
+
+
 class NostalgiaTV:
     def __init__(self, url: str, api_key: str = "", username: str = "", password: str = "", profile_id: str = ""):
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.username, self.password = username, password
+        self.profile_id = profile_id
         self.params = {"profileId": profile_id} if profile_id else {}
         self.http = httpx.AsyncClient(timeout=60)
 
@@ -107,7 +123,11 @@ class NostalgiaTV:
                                       json={"username": self.username, "password": self.password})
             lr.raise_for_status()
             self.api_key = lr.json()["token"]
-        log.info("NostalgiaTV reachable (login %s)", "required" if needs_login else "not configured")
+        if not self.profile_id:
+            self.profile_id = choose_profile(await self._req("GET", "/api/profiles/"))
+            self.params = {"profileId": self.profile_id}
+        log.info("NostalgiaTV reachable (login %s), profile %s",
+                 "required" if needs_login else "not configured", self.profile_id)
 
     async def _req(self, method: str, path: str, **kw) -> Any:
         params = {**self.params, **kw.pop("params", {})}

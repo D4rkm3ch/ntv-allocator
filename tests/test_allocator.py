@@ -262,9 +262,28 @@ async def run_cleanup():
     check("clean-up: dry run asks nothing", len(ch.sent) == n)
     M.CFG["dry_run"] = False
 
+def run_profile():
+    from app.clients import choose_profile
+    check("profile: the only real profile is chosen (legacy blank entry ignored)",
+          choose_profile([{"id": "", "name": "Default"}, {"id": "ac80", "name": "Default"}]) == "ac80")
+    check("profile: wrapped list and active flag understood",
+          choose_profile({"profiles": [{"id": "a"}, {"id": "b", "active": True}]}) == "b")
+    try:
+        choose_profile([{"id": "a"}, {"id": "b"}]); ok = False
+    except RuntimeError as e:
+        ok = "NTV_PROFILE_ID" in str(e)
+    check("profile: several profiles and none active stops with a clear error", ok)
+    st = M.State(tmp + "/p.db")
+    st.mark_done("1", "Placed On Legacy", ["app_genre_action"], "auto")
+    check("profile: first run with a profile clears placements made without one",
+          st.switch_profile("ac80") == 1 and not st.is_known("1"))
+    st.mark_done("2", "Placed Properly", ["app_genre_action"], "auto")
+    check("profile: same profile on restart keeps placements", st.switch_profile("ac80") == 0 and st.is_known("2"))
+
 async def _ret(v): return v
 
 asyncio.run(run())
 asyncio.run(run_cleanup())
+run_profile()
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

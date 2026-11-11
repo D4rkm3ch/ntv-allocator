@@ -59,6 +59,10 @@ class Allocator(discord.Client):
                 log.info("cleared %d dry-run decisions; they will be applied on this scan", n)
         await self._connect("Plex", CFG["plex_url"], self.plex.init)
         await self._connect("NostalgiaTV", CFG["ntv_url"], self.ntv.init)
+        n = self.state.switch_profile(self.ntv.profile_id)
+        if n:
+            log.info("NostalgiaTV profile is now %s; cleared %d earlier placement records so recent titles "
+                     "are re-checked against it", self.ntv.profile_id, n)
         self.loop.create_task(self._scan_loop())
 
     @staticmethod

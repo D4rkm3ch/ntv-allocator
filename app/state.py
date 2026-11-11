@@ -15,6 +15,7 @@ class State:
         self.db.execute("""CREATE TABLE IF NOT EXISTS done (
             key TEXT PRIMARY KEY, label TEXT, channels TEXT, how TEXT, at REAL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS skipped (key TEXT PRIMARY KEY, label TEXT, at REAL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS labels (key TEXT PRIMARY KEY, label TEXT)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS removals (
             key TEXT PRIMARY KEY, label TEXT, pairs TEXT, status TEXT, message_id TEXT, at REAL)""")
@@ -129,3 +130,16 @@ class State:
             self.db.execute("DELETE FROM removals WHERE key=?", (r[0],))
         self.db.commit()
         return back
+
+    # profile ----------------------------------------------------------------
+    def switch_profile(self, profile_id: str) -> int:
+        """Record the NostalgiaTV profile in use. When it differs from the recorded one (including
+        state written before profiles were tracked), placements recorded so far are forgotten so
+        recent titles are re-checked against the right profile. Returns the rows cleared."""
+        row = self.db.execute("SELECT value FROM meta WHERE name='profile'").fetchone()
+        if row and row[0] == profile_id:
+            return 0
+        n = self.db.execute("DELETE FROM done").rowcount
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('profile', ?)", (profile_id,))
+        self.db.commit()
+        return n
