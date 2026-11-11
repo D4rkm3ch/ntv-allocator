@@ -101,7 +101,7 @@ class Allocator(discord.Client):
             candidates = [k for k in unassigned | recent if not self.state.is_known(k)]
             log.info("scan: %d unassigned, %d recent, %d to evaluate", len(unassigned), len(recent), len(candidates))
 
-            config_homes, manual = await self.ntv.config_homes(self.rules.not_a_home) if candidates else ({}, set())
+            config_homes, excluded = await self.ntv.config_homes(self.rules.not_a_home) if candidates else ({}, set())
             auto: dict[str, list[str]] = {}
             for key in candidates:
                 t = await self.plex.title(key)
@@ -111,13 +111,13 @@ class Allocator(discord.Client):
                 self.titles[key] = t
                 homes = sorted(config_homes.get(key, set()))
                 if not homes:
-                    # NostalgiaTV's lookup also matches channels' automatic criteria, which do not
-                    # apply to channels that use a manual list, so only criteria channels count
+                    # NostalgiaTV's lookup also matches automatic criteria (which do not apply to
+                    # manual-list channels) and hidden channels; only visible criteria channels count
                     reported = await self.ntv.channels_containing(self.plex.qualified(key))
-                    homes = [c for c in reported if c not in self.rules.not_a_home and c not in manual]
+                    homes = [c for c in reported if c not in self.rules.not_a_home and c not in excluded]
                     ignored = [c for c in reported if c not in homes]
                     if ignored:
-                        log.info("%s: lookup also reported %s (manual-list or non-home channels, ignored)",
+                        log.info("%s: lookup also reported %s (hidden, manual-list or non-home channels, ignored)",
                                  t.label, ignored)
                 if homes:
                     log.info("%s: already on %s, nothing to do", t.label, homes)
