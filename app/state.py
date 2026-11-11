@@ -143,3 +143,13 @@ class State:
         self.db.execute("INSERT OR REPLACE INTO meta VALUES ('profile', ?)", (profile_id,))
         self.db.commit()
         return n
+
+    # counts for the status page ------------------------------------------------
+    def count_pending(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM pending").fetchone()[0]
+
+    def count_removals_pending(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM removals WHERE status='pending'").fetchone()[0]
+
+    def count_done(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM done").fetchone()[0]

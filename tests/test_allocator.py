@@ -78,6 +78,9 @@ def make(keys):
     a = M.Allocator.__new__(M.Allocator)
     a.rules = M.Rules(os.environ["RULES_PATH"]); a.state = M.State(os.environ["STATE_PATH"])
     a.plex, a.ntv, a.lock, a.titles, a.missing_since = Plex(keys), NTV(), asyncio.Lock(), {}, {}
+    from collections import deque
+    a.cfg, a.checks, a.last_scan, a.scan_summary, a.next_run = M.CFG, {}, {}, "", None
+    a.recent_events, a.started, a.mass_warned = deque(maxlen=50), time.time(), False
     ch = Chan()
     async def _channel(): return ch
     a._channel = _channel
@@ -337,6 +340,29 @@ async def run_health():
     await a.run_once(); await a._flush_alerts()
     check("health: two scan errors in a row are reported", len(ch.sent) == n + 1 and "Allocator scans problem" in ch.sent[-1]["content"])
 
+def run_status():
+    from app import status
+    a, ch = make([])
+    a.ntv.profile_id = "ac80"
+    a.is_ready = lambda: True; a.is_closed = lambda: False
+    a.checks = {"Plex": {"ok": True, "at": time.time()},
+                "NostalgiaTV": {"ok": False, "at": time.time(), "reason": "is not reachable at http://n", "since": time.time() - 300}}
+    a.last_scan = {"at": time.time(), "ok": True, "summary": "4 recent, 0 unassigned, 0 new to check"}
+    a.note("**X-Men (2000)**: placed on Action")
+    snap = status.snapshot(a)
+    page = status.render(snap)
+    check("status: overall shows a problem when NostalgiaTV is down", snap["overall"] == "problem")
+    check("status: page lists services, reason and activity without markdown",
+          "NostalgiaTV" in page and "is not reachable" in page and "X-Men (2000): placed on Action" in page and "**" not in page)
+    import json as _j
+    blob = _j.dumps(snap).lower()
+    check("status: page data carries no token, password or API key fields",
+          not any(w in blob for w in ("token", "password", "api_key", "apikey")) and "token" not in page.lower())
+    a.checks["NostalgiaTV"] = {"ok": True, "at": time.time()}
+    check("status: overall ok when everything works", status.snapshot(a)["overall"] == "ok")
+    import json; json.dumps(status.snapshot(a))
+    check("status: JSON endpoint data is serialisable", True)
+
 def run_profile():
     from app.clients import choose_profile
     check("profile: the only real profile is chosen (legacy blank entry ignored)",
@@ -361,5 +387,6 @@ asyncio.run(run())
 asyncio.run(run_cleanup())
 run_profile()
 asyncio.run(run_health())
+run_status()
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

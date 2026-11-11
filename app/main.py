@@ -8,12 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
 
 import discord
 
 from .clients import NostalgiaTV, Plex
 from .health import Health, describe
+from . import status
 from .rules import Rules, Title
 from .state import State
 
@@ -37,6 +39,7 @@ CFG = {
     "cleanup_max": int(env("CLEANUP_MAX_REMOVALS", "50")),
     "dry_run": env("DRY_RUN", "false").lower() in ("1", "true", "yes"),
     "rules": env("RULES_PATH", "/config/rules.yaml"), "state": env("STATE_PATH", "/data/state.db"),
+    "status_port": int(env("STATUS_PORT", "19860") or 0),
 }
 
 
@@ -54,6 +57,18 @@ class Allocator(discord.Client):
         self.health = Health(threshold=int(env("ALERT_AFTER_FAILURES", "3")),
                              remind_hours=float(env("ALERT_REMIND_HOURS", "6")))
         self.profile_checked = False
+        # for the status page
+        self.cfg = CFG
+        self.checks: dict[str, dict] = {}
+        self.last_scan: dict = {}
+        self.scan_summary = ""
+        self.next_run: float | None = None
+        self.recent_events: deque = deque(maxlen=50)
+        self.started = time.time()
+
+    def note(self, text: str) -> None:
+        """Recent activity for the status page."""
+        self.recent_events.append((time.time(), text.replace("**", "")))
 
     # ------------------------------------------------------------------ lifecycle
     async def setup_hook(self) -> None:
@@ -61,6 +76,11 @@ class Allocator(discord.Client):
             n = self.state.clear_dry_run()
             if n:
                 log.info("cleared %d dry-run decisions; they will be applied on this scan", n)
+        if CFG["status_port"]:
+            try:
+                await status.start(self, CFG["status_port"])
+            except Exception:
+                log.exception("could not start the status page on port %d", CFG["status_port"])
         self.loop.create_task(self._scan_loop())
 
     async def on_ready(self) -> None:
@@ -78,10 +98,14 @@ class Allocator(discord.Client):
             try:
                 await probe()
                 self.health.ok(name)
+                self.checks[name] = {"ok": True, "at": time.time()}
             except Exception as exc:
                 reason = describe(exc, url)
                 log.error("%s check failed: %s", name, reason)
                 self.health.fail(name, reason)
+                prev = self.checks.get(name, {})
+                since = prev.get("since") if prev.get("ok") is False else time.time()
+                self.checks[name] = {"ok": False, "at": time.time(), "reason": reason, "since": since}
                 good = False
         if good and not self.profile_checked:
             n = self.state.switch_profile(self.ntv.profile_id)
@@ -98,7 +122,7 @@ class Allocator(discord.Client):
             except Exception:
                 log.exception("could not post an alert to Discord; retrying next check")
                 return
-            self.health.outbox.pop(0)
+            self.note(self.health.outbox.pop(0))
 
     async def run_once(self) -> bool:
         """One cycle: check connections, then scan and clean up if both answer. Returns True when
@@ -110,10 +134,12 @@ class Allocator(discord.Client):
             if CFG["cleanup"]:
                 await self.cleanup()
             self.health.ok("Allocator scans")
+            self.last_scan = {"at": time.time(), "ok": True, "summary": self.scan_summary}
         except Exception as exc:
             log.exception("scan or clean-up failed")
             # a one-off error is retried quietly; two in a row is reported
             self.health.fail("Allocator scans", describe(exc) + " (details in the container log)", threshold=2)
+            self.last_scan = {"at": time.time(), "ok": False, "reason": describe(exc)}
         return True
 
     async def _scan_loop(self) -> None:
@@ -122,7 +148,9 @@ class Allocator(discord.Client):
             healthy = await self.run_once()
             await self._flush_alerts()
             # while something is down, check every minute so recovery is noticed quickly
-            await asyncio.sleep(CFG["interval"] * 60 if healthy else 60)
+            wait = CFG["interval"] * 60 if healthy else 60
+            self.next_run = time.time() + wait
+            await asyncio.sleep(wait)
 
     # ------------------------------------------------------------------ scanning
     async def scan(self) -> None:
@@ -134,6 +162,7 @@ class Allocator(discord.Client):
                 self.state.forget_resolved(k, CFG["reask_days"])
             candidates = [k for k in unassigned | recent if not self.state.is_known(k)]
             log.info("scan: %d unassigned, %d recent, %d to evaluate", len(unassigned), len(recent), len(candidates))
+            self.scan_summary = f"{len(recent)} recent, {len(unassigned)} unassigned, {len(candidates)} new to check"
             if not candidates:
                 await self._post_unsent()
                 return
@@ -241,6 +270,7 @@ class Allocator(discord.Client):
         msg = await (await self._channel()).send(
             f"**Deleted from Plex: {r['label']}**\nStill on: {names}\nRemove it from these channels?", view=v)
         self.state.set_removal_message(key, msg.id)
+        self.note(f"Asked whether to remove {r['label']} (deleted from Plex)")
 
     async def _answer_removal(self, it: discord.Interaction, action: str, key: str) -> None:
         r = self.state.get_removal(key)
@@ -249,6 +279,7 @@ class Allocator(discord.Client):
             return
         if action == "keep":
             self.state.set_removal_status(key, "kept")
+            self.note(f"{r['label']}: kept on its channels ({it.user.name})")
             await it.response.edit_message(content=f"**{r['label']}**: kept on {self._names([c for c, _ in r['pairs']])}. "
                                                    f"It will not be asked about again.", view=None)
             return
@@ -289,6 +320,7 @@ class Allocator(discord.Client):
                                    f"Press Remove again to retry.", ephemeral=True)
             return
         self.state.set_removal_status(key, "removed")
+        self.note(f"{r['label']}: removed from {self._names(done)} ({it.user.name})")
         self.missing_since.pop(key, None)
         await it.message.edit(content=f"**{r['label']}**: removed from {self._names(done)}.", view=None)
 
@@ -368,6 +400,7 @@ class Allocator(discord.Client):
             # dry-run decisions are remembered (so they are not re-posted every scan) but flagged,
             # and cleared on the first start without DRY_RUN so they are applied for real
             self.state.mark_done(key, label, chans, f"dry run ({how})" if CFG["dry_run"] else how)
+            self.note(f"{label}: placed on {self._names(chans)} ({'dry run, ' if CFG['dry_run'] else ''}{how})")
         if how == "auto":
             await self._post_summary({k: c for k, c in accepted.items() if c}, refusals)
         elif refusals:
@@ -402,6 +435,7 @@ class Allocator(discord.Client):
         embed.add_field(name="Suggested", value=self._names(pend["suggested"]), inline=False)
         embed.set_footer(text="Choose up to 3 channels, then Approve, or Skip for now.")
         msg = await (await self._channel()).send("**Where should this go?**", embed=embed, view=self._view(t, pend["selected"]))
+        self.note(f"Asked where {t.label} should go")
         self.state.set_message(key, msg.id)
 
     def _view(self, t: Title, selected: list[str]) -> discord.ui.View:

@@ -4,6 +4,8 @@ services:
     container_name: ntv-allocator
     restart: unless-stopped
     user: ${PUID}:${PGID}
+    ports:
+      - 19860:19860             # status page: http://<nas>:19860
     environment:
       - TZ=Australia/Sydney
       # Plex
@@ -27,6 +29,7 @@ services:
       - DRY_RUN=false           # true = post what it would do without changing anything
       - ALERT_AFTER_FAILURES=3  # failed checks in a row before a Discord alert (1 minute apart)
       - ALERT_REMIND_HOURS=6    # reminder while a problem lasts
+      - STATUS_PORT=19860
       - LOG_LEVEL=INFO
     volumes:
       - /mnt/Swimming/Sandboxes/docker/ntv-allocator/config:/config

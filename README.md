@@ -55,6 +55,13 @@ after you delete it), one Discord message is posted for it:
   Raise the limit and restart for a deliberate large purge.
 - Set `CLEANUP=false` to turn it off. With `DRY_RUN=true` it only logs what it would ask.
 
+## Status page
+
+Open `http://<nas>:19860` (`STATUS_PORT`) for a read-only page that refreshes every 30 seconds: whether
+Plex, NostalgiaTV, Discord and the scans are working (with the reason when not), last and next scan,
+open questions, the last 50 actions, and the main settings. `/api/status` returns the same as JSON for
+Homepage or Home Assistant. It shows no tokens or passwords; keep the port on your LAN.
+
 ## Connection alerts
 
 Before every scan the allocator checks that Plex and NostalgiaTV answer an authenticated request.
