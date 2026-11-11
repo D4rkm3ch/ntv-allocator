@@ -57,6 +57,11 @@ class State:
         self.db.execute("INSERT OR REPLACE INTO skipped VALUES (?,?,?)", (key, label, time.time()))
         self.db.commit()
 
+    def clear_dry_run(self) -> int:
+        cur = self.db.execute("DELETE FROM done WHERE how LIKE 'dry run%'")
+        self.db.commit()
+        return cur.rowcount
+
     def forget(self, key: str) -> None:
         """Allow a title to be re-evaluated (e.g. it lost its channels)."""
         for t in ("pending", "done", "skipped"):

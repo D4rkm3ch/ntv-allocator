@@ -48,6 +48,10 @@ class Allocator(discord.Client):
 
     # ------------------------------------------------------------------ lifecycle
     async def setup_hook(self) -> None:
+        if not CFG["dry_run"]:
+            n = self.state.clear_dry_run()
+            if n:
+                log.info("cleared %d dry-run decisions; they will be applied on this scan", n)
         await self._connect("Plex", CFG["plex_url"], self.plex.init)
         await self._connect("NostalgiaTV", CFG["ntv_url"], self.ntv.init)
         self.loop.create_task(self._scan_loop())
@@ -138,7 +142,9 @@ class Allocator(discord.Client):
                 await self.ntv.refresh_channel(ch)
         for key, chans in placements.items():
             label = self.titles[key].label if key in self.titles else key
-            self.state.mark_done(key, label, chans, how)
+            # dry-run decisions are remembered (so they are not re-posted every scan) but flagged,
+            # and cleared on the first start without DRY_RUN so they are applied for real
+            self.state.mark_done(key, label, chans, f"dry run ({how})" if CFG["dry_run"] else how)
 
     # ------------------------------------------------------------------ Discord output
     def _names(self, chans: list[str]) -> str:
