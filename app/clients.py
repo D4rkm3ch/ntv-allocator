@@ -136,7 +136,7 @@ class NostalgiaTV:
         log.debug("channels-containing %s -> %s", qualified_key, found)
         return found
 
-    async def config_homes(self, not_a_home: set[str]) -> dict[str, set[str]]:
+    async def config_homes(self, not_a_home: set[str]) -> tuple[dict[str, set[str]], set[str]]:
         """Plex rating key -> visible channels whose saved manual list contains it.
 
         Read from the exported config, because channels-containing does not always report
@@ -144,8 +144,11 @@ class NostalgiaTV:
         cfg = await self._req("GET", "/api/config/export")
         hidden = set(cfg.get("hiddenChannels") or [])
         homes: dict[str, set[str]] = {}
+        manual: set[str] = set()   # channels whose content is a manual list (criteria do not apply)
 
         def add(ch, keys):
+            if keys:
+                manual.add(ch)
             if ch in hidden or ch in not_a_home:
                 return
             for k in keys or []:
@@ -154,7 +157,7 @@ class NostalgiaTV:
             add(ch, o.get("customMediaRatingKeys"))
         for c in cfg.get("customChannels") or []:
             add(c.get("stableId"), c.get("customMediaRatingKeys"))
-        return homes
+        return homes, manual
 
     async def add_to_channel(self, channel_id: str, qualified_keys: list[str]) -> dict:
         return await self._req("POST", "/api/content/add-to-channel",
