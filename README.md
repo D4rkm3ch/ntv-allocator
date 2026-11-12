@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo-512.png" width="160" alt="NTV Allocator logo"></p>
+
 # NostalgiaTV Channel Allocator
 
 Watches Plex and NostalgiaTV, finds shows and movies that have no permanent channel, and places them.
@@ -121,6 +123,8 @@ which is not in the catalogue stops the container with a clear error instead of 
 
 ## Files
 
+- `assets/`: the logo (colour SVG and PNGs, outlined SVGs for light and dark backgrounds). Use
+  `assets/logo-512.png` as the Discord bot's avatar.
 - `app/main.py`: scan loop and Discord interaction
 - `app/rules.py`: placement rules engine
 - `app/clients.py`: Plex and NostalgiaTV API clients

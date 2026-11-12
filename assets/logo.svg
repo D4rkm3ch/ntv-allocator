@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<!-- Level rainbow beam refracted with n = 1.5 (Snell's law): incidence 58.5 deg outside,
+     34.6 deg inside. Beam widths follow the shared footprint on the face. -->
+<defs><clipPath id="sq"><rect width="512" height="512" rx="104"/></clipPath>
+<clipPath id="tri"><path d="M30.0 82.4 Q30.0 32.0 77.6 57.2 L338.0 216.8 Q382.8 256.0 338.0 295.2 L77.6 454.8 Q30.0 480.0 30.0 429.6 Z"/></clipPath></defs>
+<rect width="512" height="512" rx="104" fill="#0f1a2b"/>
+<g clip-path="url(#sq)"><g transform="translate(47.2 -26.2) scale(1.1022)">
+<path d="M172.5 115.4 L209.5 138.0 L909.5 138.0 L872.5 115.4 Z" fill="#ef5350"/><path d="M209.5 138.0 L246.5 160.7 L946.5 160.7 L909.5 138.0 Z" fill="#47b86b"/><path d="M246.5 160.7 L283.4 183.4 L983.4 183.4 L946.5 160.7 Z" fill="#3f86e8"/>
+<path d="M30.0 82.4 Q30.0 32.0 77.6 57.2 L338.0 216.8 Q382.8 256.0 338.0 295.2 L77.6 454.8 Q30.0 480.0 30.0 429.6 Z" fill="#e8c98f"/>
+<path d="M172.5 115.4 L283.4 183.4 L181.4 307.6 L81.8 225.8 Z" fill="#ffffff" clip-path="url(#tri)"/>
+<path d="M30.0 82.4 Q30.0 32.0 77.6 57.2 L338.0 216.8 Q382.8 256.0 338.0 295.2 L77.6 454.8 Q30.0 480.0 30.0 429.6 Z" fill="none" stroke="#0f1a2b" stroke-width="12" stroke-linejoin="round"/>
+<g stroke="#172437" stroke-width="12.5" stroke-linecap="round"><path d="M131.0 203.0 L98.3 150.7"/><path d="M145.0 203.0 L177.7 150.7"/></g><circle cx="98.3" cy="150.7" r="11.844262295081966" fill="#172437"/><circle cx="177.7" cy="150.7" r="11.844262295081966" fill="#172437"/>
+<rect x="53.0" y="201.0" width="170.0" height="142.0" rx="26.5" fill="#172437"/>
+<rect x="71.3" y="215.0" width="32.3" height="114.0" rx="5" fill="#ef5350"/><rect x="121.9" y="215.0" width="32.3" height="114.0" rx="5" fill="#47b86b"/><rect x="172.4" y="215.0" width="32.3" height="114.0" rx="5" fill="#3f86e8"/>
+</g></g>
+</svg>

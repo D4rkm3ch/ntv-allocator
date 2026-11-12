@@ -4,6 +4,7 @@ Shows no tokens or passwords. Served with aiohttp, which discord.py already depe
 """
 from __future__ import annotations
 
+import base64
 import html
 import logging
 import time
@@ -12,6 +13,10 @@ from datetime import datetime
 from aiohttp import web
 
 log = logging.getLogger("status")
+
+# The app logo, embedded so the page needs no static files (source: assets/logo.svg)
+LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><clipPath id="ntva-sq"><rect width="512" height="512" rx="104"/></clipPath><clipPath id="ntva-tri"><path d="M30.0 82.4 Q30.0 32.0 77.6 57.2 L338.0 216.8 Q382.8 256.0 338.0 295.2 L77.6 454.8 Q30.0 480.0 30.0 429.6 Z"/></clipPath></defs><rect width="512" height="512" rx="104" fill="#0f1a2b"/><g clip-path="url(#ntva-sq)"><g transform="translate(47.2 -26.2) scale(1.1)"><path d="M172.5 115.4 L209.5 138.0 L909.5 138.0 L872.5 115.4 Z" fill="#ef5350"/><path d="M209.5 138.0 L246.5 160.7 L946.5 160.7 L909.5 138.0 Z" fill="#47b86b"/><path d="M246.5 160.7 L283.4 183.4 L983.4 183.4 L946.5 160.7 Z" fill="#3f86e8"/><path d="M30.0 82.4 Q30.0 32.0 77.6 57.2 L338.0 216.8 Q382.8 256.0 338.0 295.2 L77.6 454.8 Q30.0 480.0 30.0 429.6 Z" fill="#e8c98f"/><path d="M172.5 115.4 L283.4 183.4 L181.4 307.6 L81.8 225.8 Z" fill="#ffffff" clip-path="url(#ntva-tri)"/><path d="M30.0 82.4 Q30.0 32.0 77.6 57.2 L338.0 216.8 Q382.8 256.0 338.0 295.2 L77.6 454.8 Q30.0 480.0 30.0 429.6 Z" fill="none" stroke="#0f1a2b" stroke-width="12" stroke-linejoin="round"/><g stroke="#172437" stroke-width="12.5" stroke-linecap="round"><path d="M131.0 203.0 L98.3 150.7"/><path d="M145.0 203.0 L177.7 150.7"/></g><circle cx="98.3" cy="150.7" r="11.8" fill="#172437"/><circle cx="177.7" cy="150.7" r="11.8" fill="#172437"/><rect x="53.0" y="201.0" width="170.0" height="142.0" rx="26.5" fill="#172437"/><rect x="71.3" y="215.0" width="32.3" height="114.0" rx="5" fill="#ef5350"/><rect x="121.9" y="215.0" width="32.3" height="114.0" rx="5" fill="#47b86b"/><rect x="172.4" y="215.0" width="32.3" height="114.0" rx="5" fill="#3f86e8"/></g></g></svg>'
+FAVICON = "data:image/svg+xml;base64," + base64.b64encode(LOGO_SVG.encode()).decode()
 
 
 def _t(ts: float | None) -> str:
@@ -87,11 +92,12 @@ def render(s: dict) -> str:
     st = s["settings"]
     return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1"><meta http-equiv=refresh content=30>
-<title>NTV Allocator</title>
+<title>NTV Allocator</title><link rel=icon type="image/svg+xml" href="__FAVICON__">
 <script>try{{var t=localStorage.getItem("ntva-theme");if(t)document.documentElement.dataset.theme=t}}catch(e){{}}</script><style>
 :root{{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--dim:#6b7385;--line:#e3e6ec;--ok:#1f8a4c;--bad:#c62f2f;--wait:#a26b00}}
 @media (prefers-color-scheme:dark){{:root:not([data-theme=light]){{--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}}}}
 :root[data-theme=dark]{{--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}}
+.brand{{display:flex;align-items:center;gap:14px}}.logo svg{{width:52px;height:52px;display:block}}
 .head{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}
 .theme{{background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:8px;width:38px;height:38px;
 display:grid;place-items:center;cursor:pointer;padding:0;flex:none}}.theme:hover{{border-color:var(--dim)}}
@@ -109,7 +115,7 @@ th{{color:var(--dim);font-weight:500;border-top:0}}.dim{{color:var(--dim)}}.nowr
 .pill.ok{{color:var(--ok);border:1px solid var(--ok)}}.pill.bad{{color:var(--bad);border:1px solid var(--bad)}}.pill.wait{{color:var(--wait);border:1px solid var(--wait)}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}}.num{{font-size:22px;font-weight:600}}
 </style></head><body><main>
-<div class=head><div><h1>NTV Allocator</h1><p class=dim>Refreshes every 30 seconds. Running since {e(_t(s["started"]))}.</p></div>
+<div class=head><div class=brand><span class=logo>__LOGO__</span><div><h1>NTV Allocator</h1><p class=dim>Refreshes every 30 seconds. Running since {e(_t(s["started"]))}.</p></div></div>
 <button class=theme id=theme type=button aria-label="Toggle dark mode" title="Toggle dark mode">
 <svg class=moon viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
 <svg class=sun viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -134,7 +140,7 @@ r.dataset.theme=n;try{{localStorage.setItem("ntva-theme",n)}}catch(e){{}}}};</sc
 <tr><td>Look-back for new titles</td><td>{st["lookback_days"]} days</td></tr>
 <tr><td>Skipped titles asked again after</td><td>{st["reask_days"]} days</td></tr>
 </table><p class=dim>JSON for dashboards: <code>/api/status</code></p></div>
-</main></body></html>"""
+</main></body></html>""".replace("__LOGO__", LOGO_SVG).replace("__FAVICON__", FAVICON)
 
 
 async def start(a, port: int) -> None:
