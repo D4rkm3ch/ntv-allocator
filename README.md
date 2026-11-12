@@ -123,7 +123,7 @@ which is not in the catalogue stops the container with a clear error instead of 
 
 ## Files
 
-- `assets/`: the logo (colour SVG and PNGs, outlined SVGs for light and dark backgrounds). Use
+- `assets/`: the logo (colour SVG and PNGs) and single-colour variants in blue, grey, off-white and black, matching NostalgiaTV's alternate logos. Use
   `assets/logo-512.png` as the Discord bot's avatar.
 - `app/main.py`: scan loop and Discord interaction
 - `app/rules.py`: placement rules engine
