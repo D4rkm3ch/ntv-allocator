@@ -151,7 +151,8 @@ async def start(a, port: int) -> None:
         return web.json_response(snapshot(a))
 
     app = web.Application()
-    app.add_routes([web.get("/", page), web.get("/api/status", api)])
+    # the page answers on any path, so a stale or mistyped address (e.g. a cached /admin/ redirect) still works
+    app.add_routes([web.get("/api/status", api), web.get("/", page), web.get("/{tail:.*}", page)])
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
