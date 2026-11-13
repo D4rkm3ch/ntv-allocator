@@ -82,13 +82,16 @@ def make(keys):
     a.cfg, a.checks, a.last_scan, a.scan_summary, a.next_run = M.CFG, {}, {}, "", None
     a.recent_events, a.started, a.mass_warned = deque(maxlen=50), time.time(), False
     a.library_cache = (0.0, [])
+    a.auth = M.Auth(a.state); a.wake = asyncio.Event(); a.seeded = []
+    a.health = M.Health(threshold=M.CFG["alert_after"], remind_hours=M.CFG["alert_remind"])
     ch = Chan()
     async def _channel(): return ch
     a._channel = _channel
     return a, ch
 
 async def run():
-    M.CFG["auto_place"] = True          # these checks cover the optional automatic mode
+    M.CFG["auto_place"] = True          # these checks cover the legacy automatic mode
+    M.CFG["dry_run"] = False
     a, ch = make(["1","2","3","4","5"])
     await a.scan()
     adds = [c for c in a.ntv.calls if c[0] == "add"]
@@ -358,20 +361,68 @@ def run_status():
     a.checks = {"Plex": {"ok": True, "at": time.time()},
                 "NostalgiaTV": {"ok": False, "at": time.time(), "reason": "is not reachable at http://n", "since": time.time() - 300}}
     a.last_scan = {"at": time.time(), "ok": True, "summary": "4 recent, 0 unassigned, 0 new to check"}
-    a.note("**X-Men (2000)**: placed on Action")
+    a.state.mark_done("7", "X-Men (2000)", ["app_genre_action"], "approved by dustin")
     snap = status.snapshot(a)
     page = status.render(snap)
     check("status: overall shows a problem when NostalgiaTV is down", snap["overall"] == "problem")
-    check("status: page lists services, reason and activity without markdown",
-          "NostalgiaTV" in page and "is not reachable" in page and "X-Men (2000): placed on Action" in page and "**" not in page)
+    check("status: page lists services, reason and recent placements; no Recent activity section",
+          "NostalgiaTV" in page and "is not reachable" in page and "X-Men (2000)" in page and "Recent activity" not in page)
+    check("status: settings are editable controls", 'name="dry_run"' in page and 'name="interval"' in page and "Save settings" in page)
+    pub = status.health(a)
     import json as _j
-    blob = _j.dumps(snap).lower()
-    check("status: page data carries no token, password or API key fields",
-          not any(w in blob for w in ("token", "password", "api_key", "apikey")) and "token" not in page.lower())
+    blob = _j.dumps(pub).lower()
+    check("status: public health data has no titles, tokens or passwords",
+          "x-men" not in blob and not any(w in blob for w in ("token", "password", "api_key")))
     a.checks["NostalgiaTV"] = {"ok": True, "at": time.time()}
     check("status: overall ok when everything works", status.snapshot(a)["overall"] == "ok")
-    import json; json.dumps(status.snapshot(a))
-    check("status: JSON endpoint data is serialisable", True)
+
+def run_settings_auth():
+    from app import settings as S
+    from app.auth import Auth, MAX_FAILS
+    st = M.State(tmp + "/set.db")
+    os.environ["SCAN_INTERVAL_MINUTES"] = "5"; os.environ["DRY_RUN"] = "false"
+    cfg = {}
+    seeded = S.load(st, cfg)
+    check("settings: first start seeds from old environment values", cfg["interval"] == 5 and cfg["dry_run"] is False and "interval" in seeded)
+    os.environ["SCAN_INTERVAL_MINUTES"] = "40"
+    cfg2 = {}; S.load(st, cfg2)
+    check("settings: after seeding the environment is ignored", cfg2["interval"] == 5)
+    del os.environ["SCAN_INTERVAL_MINUTES"]; del os.environ["DRY_RUN"]
+    fresh = M.State(tmp + "/fresh.db"); cfg3 = {}; S.load(fresh, cfg3)
+    check("settings: a fresh install starts in dry run", cfg3["dry_run"] is True and cfg3["interval"] == 15)
+    clean, errs = S.validate({"interval": "0", "lookback": "30", "cleanup": False, "bogus": 1})
+    check("settings: out-of-range and unknown values rejected", errs and "lookback" in clean and "interval" not in clean)
+
+    au = Auth(fresh)
+    code = au.setup_code()
+    check("auth: not set up until a password is created", not au.is_set_up() and len(code) == 9)
+    check("auth: wrong setup code refused", au.set_up("AAAA-AAAA", "longpassword", "longpassword") is not None and not au.is_set_up())
+    check("auth: short password refused", "8 characters" in au.set_up(code, "short", "short"))
+    check("auth: mismatched confirmation refused", "do not match" in au.set_up(code, "longpassword", "longpassw0rd"))
+    check("auth: correct code and matching passwords create it", au.set_up(code.lower(), "longpassword", "longpassword") is None and au.is_set_up())
+    check("auth: setup code is single-use", au.set_up(code, "another1234", "another1234") is not None)
+    check("auth: password stored hashed, never in plain text", "longpassword" not in fresh.get_secret("password"))
+    tok = au.login("1.1.1.1", "longpassword")
+    check("auth: login gives a valid session", tok and au.valid(tok) and not au.valid("forged"))
+    for _ in range(MAX_FAILS): au.login("2.2.2.2", "wrong")
+    check("auth: repeated wrong passwords lock that client out", au.locked("2.2.2.2") > 0 and not au.locked("1.1.1.1"))
+    tok2 = au.login("1.1.1.1", "longpassword")
+    check("auth: changing the password signs out other sessions",
+          au.change_password("longpassword", "newpassword1", "newpassword1") is None and not au.valid(tok) and not au.valid(tok2))
+    newcode = au.reset()
+    check("auth: reset clears the password and gives a new setup code", not au.is_set_up() and newcode != code)
+
+async def run_apply_settings():
+    a, ch = make([]); a.state = M.State(tmp + "/apply.db")
+    M.CFG["dry_run"] = True
+    a.state.mark_done("1", "X-Men (2000)", ["app_genre_action"], "dry run (auto)")
+    changed = await a.apply_settings({"dry_run": False, "interval": 7})
+    check("settings: turning dry run off clears dry-run decisions and wakes the scanner",
+          a.state.get_done("1") is None and a.wake.is_set() and M.CFG["interval"] == 7 and len(changed) == 2)
+    check("settings: saved to the database", a.state.get_settings()["interval"] == 7)
+    await a.apply_settings({"alert_after": 5, "alert_remind": 2})
+    check("settings: alert timings applied live", a.health.threshold == 5 and a.health.remind == 7200)
+    M.CFG["interval"] = 15
 
 async def run_ask_all():
     """Default: nothing is placed automatically; confident picks are pre-selected in the question."""
@@ -417,25 +468,53 @@ async def run_edit():
     res = await a.edit_placement("50", ["app_docu"])
     check("edit: no change makes no calls", not calls and res["message"] == "No change.")
 
-    # status endpoints: read is open, editing needs the key
+    # status endpoints: setup, login, then edit
     from app import status
     import httpx
     a.is_ready = lambda: True; a.is_closed = lambda: False; a.ntv.profile_id = "p"
     a.current_channels = lambda k: _ret(["app_docu"])
-    M.CFG["edit_key"] = "s3cret"
+    a.auth = M.Auth(a.state)
     await status.start(a, 19873)
+    U = "http://127.0.0.1:19873"; H = {"X-Requested-With": "ntva"}
+    async with httpx.AsyncClient() as anon:
+        first = (await anon.get(U + "/")).text
+        pub = (await anon.get(U + "/api/status")).json()
+        g401 = await anon.get(U + "/api/placements/50")
+        p401 = await anon.post(U + "/api/placements/50", json={"channels": []}, headers=H)
+        nohdr = await anon.post(U + "/api/setup", json={"code": a.auth.setup_code(), "password": "longpassword", "confirm": "longpassword"})
+    check("web: first visit shows the setup screen", "Create the admin password" in first and "Planet Doc" not in first)
+    check("web: public /api/status works without login and has no titles", "overall" in pub and "placements" not in pub)
+    check("web: data and edits refused without login", g401.status_code == 401 and p401.status_code == 401)
+    check("web: posts without the app header are refused (cross-site protection)", nohdr.status_code == 403 and not a.auth.is_set_up())
     async with httpx.AsyncClient() as c:
-        page = (await c.get("http://127.0.0.1:19873/")).text
-        g = (await c.get("http://127.0.0.1:19873/api/placements/50")).json()
-        no = await c.post("http://127.0.0.1:19873/api/placements/50", json={"channels": []})
-        bad = await c.post("http://127.0.0.1:19873/api/placements/50", json={"channels": []}, headers={"X-Edit-Key": "nope"})
-        ok = await c.post("http://127.0.0.1:19873/api/placements/50", json={"channels": ["app_docu"]}, headers={"X-Edit-Key": "s3cret"})
+        bad = (await c.post(U + "/api/setup", json={"code": "WRONG-CODE", "password": "longpassword", "confirm": "longpassword"}, headers=H)).json()
+        su = await c.post(U + "/api/setup", json={"code": a.auth.setup_code(), "password": "longpassword", "confirm": "longpassword"}, headers=H)
+        page = (await c.get(U + "/")).text
+        g = (await c.get(U + "/api/placements/50")).json()
+        ok = await c.post(U + "/api/placements/50", json={"channels": ["app_docu"]}, headers=H)
+        sv = (await c.post(U + "/api/settings", json={"interval": "9"}, headers=H)).json()
+        sbad = (await c.post(U + "/api/settings", json={"interval": "500"}, headers=H)).json()
+    check("web: wrong setup code refused", bad["ok"] is False and "setup code" in bad["message"])
+    check("web: setup logs this browser in with a secure cookie", su.json()["ok"] and "httponly" in su.headers.get("set-cookie", "").lower()
+          and "samesite=strict" in su.headers.get("set-cookie", "").lower())
     check("status: Recent placements section lists the title with an Edit button",
           "Recent placements" in page and "Planet Doc (2026)" in page and "class=edit" in page)
     check("status: placement lookup returns current channels and alphabetical options",
           g["current"] == ["app_docu"] and len(g["options"]) == len(a.rules.names))
-    check("status: editing refused without the key or with a wrong key", no.status_code == 403 and bad.status_code == 403)
-    check("status: editing allowed with the key", ok.status_code == 200 and ok.json()["ok"])
+    check("status: editing allowed when logged in", ok.status_code == 200 and ok.json()["ok"])
+    check("web: settings saved from the page, invalid values refused", sv["ok"] and M.CFG["interval"] == 9 and not sbad["ok"])
+    M.CFG["interval"] = 15
+    async with httpx.AsyncClient() as other:
+        login_page = (await other.get(U + "/")).text
+        wrong = (await other.post(U + "/api/login", json={"password": "nope"}, headers=H)).json()
+        right = await other.post(U + "/api/login", json={"password": "longpassword"}, headers=H)
+        after = (await other.get(U + "/")).text
+        await other.post(U + "/api/logout", json={}, headers=H)
+        out = (await other.get(U + "/")).text
+    check("web: other browsers get the login screen", "Log in" in login_page and "Planet Doc" not in login_page)
+    check("web: wrong password refused, right password logs in", not wrong["ok"] and right.json()["ok"] and "Recent placements" in after)
+    check("web: log out ends the session", "Log in" in out)
+    c = httpx.AsyncClient(cookies=dict(su.cookies))
     # library page and data
     async def items(ign): return [{"key": "50", "label": "Planet Doc (2026)", "library": "Documentary Shows", "type": "show", "added": 0},
                                   {"key": "51", "label": "The Office (US) (2005)", "library": "TV Shows", "type": "show", "added": 0},
@@ -443,7 +522,7 @@ async def run_edit():
     a.plex.library_items = items
     manual.update({"app_docu": ["MID:50"], "app_comedy_middle": ["MID:51"]})
     a.library_cache = (0.0, [])
-    async with httpx.AsyncClient() as c:
+    async with c:
         lp = (await c.get("http://127.0.0.1:19873/library")).text
         lib = (await c.get("http://127.0.0.1:19873/api/library")).json()
     check("library: page served with search and filters", "id=q" in lp and "No channel" in lp and "/api/library" in lp)
@@ -453,7 +532,6 @@ async def run_edit():
           and byk["51"]["names"] == [a.rules.names["app_comedy_middle"]])
     check("library: sorted ignoring a leading 'The', libraries listed",
           [i["label"] for i in lib["items"]][-1] == "Planet Doc (2026)" and lib["libraries"] == ["Documentary Shows", "Movies", "TV Shows"])
-    M.CFG["edit_key"] = ""
 
 def run_profile():
     from app.clients import choose_profile
@@ -482,5 +560,7 @@ asyncio.run(run_health())
 run_status()
 asyncio.run(run_ask_all())
 asyncio.run(run_edit())
+run_settings_auth()
+asyncio.run(run_apply_settings())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

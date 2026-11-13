@@ -13,6 +13,8 @@ from collections import defaultdict, deque
 
 import discord
 
+from . import settings as settings_mod
+from .auth import Auth
 from .clients import NostalgiaTV, Plex
 from .health import Health, describe
 from . import status
@@ -33,16 +35,12 @@ CFG = {
     "ntv_user": env("NTV_USERNAME"), "ntv_pass": env("NTV_PASSWORD"), "ntv_profile": env("NTV_PROFILE_ID"),
     "discord_token": env("DISCORD_TOKEN"), "discord_channel": int(env("DISCORD_CHANNEL_ID", "0") or 0),
     "allowed_users": {int(x) for x in env("DISCORD_ALLOWED_USER_IDS").split(",") if x.strip()},
-    "interval": int(env("SCAN_INTERVAL_MINUTES", "15")), "lookback": int(env("LOOKBACK_DAYS", "35")),
-    "reask_days": int(env("REASK_DAYS", env("NEW_ARRIVALS_DAYS", "30"))),
-    "cleanup": env("CLEANUP", "true").lower() in ("1", "true", "yes"),
-    "cleanup_max": int(env("CLEANUP_MAX_REMOVALS", "50")),
-    "dry_run": env("DRY_RUN", "false").lower() in ("1", "true", "yes"),
+    # behaviour settings live in the state database (app/settings.py); these are only fallbacks
+    **{k: spec[2] for k, spec in settings_mod.SPEC.items()},
     "rules": env("RULES_PATH", "/config/rules.yaml"), "state": env("STATE_PATH", "/data/state.db"),
     "status_port": int(env("STATUS_PORT", "19860") or 0),
-    # off by default: every new show or movie is asked about in Discord
-    "auto_place": env("AUTO_PLACE", "false").lower() in ("1", "true", "yes"),
-    "edit_key": env("STATUS_EDIT_KEY", ""),
+    # legacy automatic placement; every new show or movie is asked about in Discord
+    "auto_place": False,
 }
 
 
@@ -51,14 +49,16 @@ class Allocator(discord.Client):
         super().__init__(intents=discord.Intents.default())
         self.rules = Rules(CFG["rules"])
         self.state = State(CFG["state"])
+        self.seeded = settings_mod.load(self.state, CFG)
+        self.auth = Auth(self.state)
+        self.wake = asyncio.Event()
         self.plex = Plex(CFG["plex_url"], CFG["plex_token"])
         self.ntv = NostalgiaTV(CFG["ntv_url"], CFG["ntv_key"], CFG["ntv_user"], CFG["ntv_pass"], CFG["ntv_profile"])
         self.lock = asyncio.Lock()
         self.titles: dict[str, Title] = {}
         self.missing_since: dict[str, float] = {}   # rating key -> first scan it was seen missing from Plex
         self.mass_warned = False
-        self.health = Health(threshold=int(env("ALERT_AFTER_FAILURES", "3")),
-                             remind_hours=float(env("ALERT_REMIND_HOURS", "6")))
+        self.health = Health(threshold=CFG["alert_after"], remind_hours=CFG["alert_remind"])
         self.profile_checked = False
         # for the status page
         self.cfg = CFG
@@ -70,12 +70,37 @@ class Allocator(discord.Client):
         self.started = time.time()
         self.library_cache: tuple[float, list[dict]] = (0.0, [])
 
+    async def apply_settings(self, clean: dict) -> list[str]:
+        """Save settings from the status page and apply them at once. Returns labels of what changed."""
+        changed = [k for k, v in clean.items() if CFG.get(k) != v]
+        was_dry = CFG["dry_run"]
+        for k in changed:
+            self.state.set_setting(k, clean[k])
+            CFG[k] = clean[k]
+        self.health.threshold = CFG["alert_after"]; self.health.remind = CFG["alert_remind"] * 3600
+        if changed:
+            log.info("settings changed on the status page: %s", ", ".join(f"{k}={CFG[k]}" for k in changed))
+        if was_dry and not CFG["dry_run"]:
+            n = self.state.clear_dry_run()
+            log.info("dry run turned off; %d dry-run decisions will be applied on the next scan", n)
+        if "interval" in changed or ("dry_run" in changed and not CFG["dry_run"]):
+            self.wake.set()                                   # rescan now / use the new interval at once
+        return [settings_mod.SPEC[k][0] for k in changed]
+
     def note(self, text: str) -> None:
         """Recent activity for the status page."""
         self.recent_events.append((time.time(), text.replace("**", "")))
 
     # ------------------------------------------------------------------ lifecycle
     async def setup_hook(self) -> None:
+        if self.seeded:
+            log.info("settings stored for the first time (now edited on the status page): %s",
+                     ", ".join(f"{k}={CFG[k]}" for k in self.seeded))
+        if not self.auth.is_set_up():
+            log.info("FIRST-TIME SETUP: open the status page and create the admin password with setup code %s",
+                     self.auth.setup_code())
+        if CFG["dry_run"]:
+            log.info("dry run is on: nothing will change in NostalgiaTV until it is turned off on the status page")
         if not CFG["dry_run"]:
             n = self.state.clear_dry_run()
             if n:
@@ -154,7 +179,11 @@ class Allocator(discord.Client):
             # while something is down, check every minute so recovery is noticed quickly
             wait = CFG["interval"] * 60 if healthy else 60
             self.next_run = time.time() + wait
-            await asyncio.sleep(wait)
+            try:
+                await asyncio.wait_for(self.wake.wait(), timeout=wait)
+            except asyncio.TimeoutError:
+                pass
+            self.wake.clear()
 
     # ------------------------------------------------------------------ scanning
     async def scan(self) -> None:

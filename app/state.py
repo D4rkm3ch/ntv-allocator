@@ -16,6 +16,9 @@ class State:
             key TEXT PRIMARY KEY, label TEXT, channels TEXT, how TEXT, at REAL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS skipped (key TEXT PRIMARY KEY, label TEXT, at REAL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, value TEXT)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires REAL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS labels (key TEXT PRIMARY KEY, label TEXT)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS removals (
             key TEXT PRIMARY KEY, label TEXT, pairs TEXT, status TEXT, message_id TEXT, at REAL)""")
@@ -174,4 +177,37 @@ class State:
 
     def drop_done(self, key: str) -> None:
         self.db.execute("DELETE FROM done WHERE key=?", (key,))
+        self.db.commit()
+
+    # settings, admin password and sessions --------------------------------------------
+    def get_settings(self) -> dict:
+        return {k: json.loads(v) for k, v in self.db.execute("SELECT name, value FROM settings").fetchall()}
+
+    def set_setting(self, name: str, value) -> None:
+        self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (name, json.dumps(value)))
+        self.db.commit()
+
+    def get_secret(self, name: str) -> str:
+        row = self.db.execute("SELECT value FROM secrets WHERE name=?", (name,)).fetchone()
+        return row[0] if row else ""
+
+    def set_secret(self, name: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO secrets VALUES (?,?)", (name, value))
+        self.db.commit()
+
+    def add_session(self, token_hash: str, expires: float) -> None:
+        self.db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+        self.db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?)", (token_hash, expires))
+        self.db.commit()
+
+    def session_valid(self, token_hash: str) -> bool:
+        row = self.db.execute("SELECT expires FROM sessions WHERE token=?", (token_hash,)).fetchone()
+        return bool(row) and row[0] > time.time()
+
+    def drop_session(self, token_hash: str) -> None:
+        self.db.execute("DELETE FROM sessions WHERE token=?", (token_hash,))
+        self.db.commit()
+
+    def clear_sessions(self) -> None:
+        self.db.execute("DELETE FROM sessions")
         self.db.commit()

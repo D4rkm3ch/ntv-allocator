@@ -20,18 +20,8 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID}
       - DISCORD_ALLOWED_USER_IDS=${DISCORD_ALLOWED_USER_IDS:-}
-      # Behaviour
-      - SCAN_INTERVAL_MINUTES=15
-      - LOOKBACK_DAYS=35
-      - REASK_DAYS=30           # a skipped title is asked about again after this many days
-      - CLEANUP=true            # ask in Discord to remove titles deleted from Plex
-      - CLEANUP_MAX_REMOVALS=50 # more missing at once = pause and warn instead of asking
-      - DRY_RUN=false           # true = post what it would do without changing anything
-      - ALERT_AFTER_FAILURES=3  # failed checks in a row before a Discord alert (1 minute apart)
-      - ALERT_REMIND_HOURS=6    # reminder while a problem lasts
+      # Status page (behaviour settings are edited on the page, not here)
       - STATUS_PORT=19860
-      - STATUS_EDIT_KEY=${STATUS_EDIT_KEY:-}   # set in .env to allow editing placements on the status page
-      - AUTO_PLACE=false        # true = place confident matches without asking
       - LOG_LEVEL=INFO
     volumes:
       - /mnt/Swimming/Sandboxes/docker/ntv-allocator/config:/config

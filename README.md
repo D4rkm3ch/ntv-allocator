@@ -5,7 +5,7 @@
 Watches Plex and NostalgiaTV, finds shows and movies that have no permanent channel, and places them.
 Every new show or movie is posted to a Discord channel with a short summary and suggested channels
 pre-selected; your choice is applied as soon as you press Approve. New episodes of a show that already
-has a channel need nothing. (Set `AUTO_PLACE=true` to let confident matches be placed without asking.) Titles you delete from Plex are
+has a channel need nothing. Titles you delete from Plex are
 offered for removal from their channels, one Discord question per show or movie.
 
 ## What it does and does not do
@@ -31,18 +31,30 @@ offered for removal from their channels, one Discord question per show or movie.
      combine the rules with NostalgiaTV's own criteria matches on visible channels (it knows original
      networks, e.g. NBC for The Office, which Plex often does not).
 4. In Discord, adjust the selection (up to 3 channels) and press **Approve**, or press
-   **Skip for now** to decide later. A skipped title that still has no channel after `REASK_DAYS`
+   **Skip for now** to decide later. A skipped title that still has no channel after the re-ask period (Settings, default 30 days)
    (default 30) is asked about again, once. Open questions are never re-posted.
 5. Clean-up: titles deleted from Plex are offered for removal in Discord (see below).
 
-## Status page: recent placements and the library
+## Status page: login, settings, recent placements and the library
+
+- **Login.** On first visit, create the admin password (at least 8 characters, entered twice) with the
+  one-time setup code printed in the container log; only someone who can read the NAS's logs can claim
+  the instance. After that, viewing and editing need a login (30 days per browser, HttpOnly cookie).
+  Five wrong passwords lock login for 15 minutes. `/api/status` stays open for dashboards and carries
+  health information only.
+- **Forgot the password?** In the TrueNAS shell run
+  `sudo docker exec ntv-allocator python -m app.reset_password`. It clears the password, signs everyone out
+  and prints a new setup code; placements and settings are kept.
+- **Settings** (status page): dry run, clean-up, scan interval, look-back, re-ask period, clean-up safety
+  limit and alert timings. They are stored in `/data/state.db` and apply immediately. On the first start
+  after upgrading, the old environment values (`DRY_RUN`, `SCAN_INTERVAL_MINUTES`, ...) are copied in once;
+  after that they are ignored and can be removed from the compose file.
 
 - **Recent placements** (status page): everything placed in the last 14 days, how it was placed, and an
   Edit button.
 - **Library** (`/library`): every show and movie in the managed libraries, shows listed once (no seasons
   or episodes). Search, filter by library or channel, or show only titles with no channel, and edit any.
-- Editing needs `STATUS_EDIT_KEY` (set it in `.env`); the page asks for it once per browser. Without it the
-  pages are read-only. Adds use NostalgiaTV's add-to-channel and clear an old exclusion; removals rewrite
+- Adds use NostalgiaTV's add-to-channel and clear an old exclusion; removals rewrite
   the channel's manual list so no exclusion is left behind (custom channels use remove-from-channel).
 - Taking every channel off a title sends it back to Discord as a question on the next scan.
 
@@ -64,10 +76,10 @@ after you delete it), one Discord message is posted for it:
 - If the title comes back to Plex before you answer, the question is closed automatically.
 - Only keys from your Plex server are checked; NostalgiaTV's own local media is never touched.
 - If Plex errors during the check, nothing is asked that pass.
-- If more than `CLEANUP_MAX_REMOVALS` (default 50) titles go missing at once, no questions are posted and
+- If more than the clean-up safety limit (Settings, default 50) titles go missing at once, no questions are posted and
   a single "Clean-up paused" message explains why: that usually means a library or drive is unmounted.
   Raise the limit and restart for a deliberate large purge.
-- Set `CLEANUP=false` to turn it off. With `DRY_RUN=true` it only logs what it would ask.
+- Turn it off under Settings. In dry run it only logs what it would ask.
 
 ## Status page
 
@@ -80,11 +92,11 @@ Homepage or Home Assistant. It shows no tokens or passwords; keep the port on yo
 
 Before every scan the allocator checks that Plex and NostalgiaTV answer an authenticated request.
 
-- A service failing 3 checks in a row (`ALERT_AFTER_FAILURES`) posts one alert, for example
+- A service failing 3 checks in a row (Settings) posts one alert, for example
   "**Plex problem**: is not reachable at http://...". While anything is down it checks every minute
   and does not scan.
 - It posts "**Plex is working again** (was down for 12 min)" on recovery, and a reminder every 6 hours
-  (`ALERT_REMIND_HOURS`) while a problem lasts.
+  (Settings) while a problem lasts.
 - Scan or clean-up errors with both servers up are retried quietly once; two in a row post an
   "Allocator scans problem" alert, with details in the container log.
 - A rejected token or login is reported as such (HTTP 401/403).
@@ -119,8 +131,9 @@ Every push to `main` builds `ghcr.io/d4rkm3ch/ntv-allocator:latest` with GitHub 
 2. Create the folders `/mnt/Swimming/Sandboxes/docker/ntv-allocator/config` and `.../data`, owned by your PUID/PGID.
 3. In Dockge, create a stack named `ntv-allocator`, paste `compose.yaml`, and put the values from
    `.env.example` in the stack's `.env` box.
-4. Deploy. Leave `DRY_RUN=true` for the first run: it posts what it would do without changing anything.
-   When the Discord messages look right, set `DRY_RUN=false` and redeploy.
+4. Deploy, then open the status page (`http://<nas>:19860`). Create the admin password with the setup code
+   printed in the container log. A new install starts in dry run: questions are posted in Discord but
+   nothing changes in NostalgiaTV. When the Discord messages look right, turn dry run off under Settings.
 5. To update later: Dockge > Update (pulls the new `latest`).
 
 ## Editing the rules
@@ -153,7 +166,7 @@ which is not in the catalogue stops the container with a clear error instead of 
 - Verified live on 2026-11-11: X-Men placed automatically (Superhero, Action, Lackluster); The Office (US)
   approved through Discord.
 - If NostalgiaTV refuses a title for a channel, the reason is logged and posted in Discord. A title refused
-  on every channel is not recorded as placed and is asked about again after `REASK_DAYS`.
+  on every channel is not recorded as placed and is asked about again after the re-ask period.
 - One title failing to evaluate (for example a Plex lookup error) is logged and retried next scan; the
   rest of the scan continues. A failed Approve shows an error in Discord and leaves the question open.
 - State lives in `/data/state.db`. Deleting it makes the allocator re-check everything; nothing is
