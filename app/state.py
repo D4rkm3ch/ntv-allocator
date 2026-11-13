@@ -168,3 +168,10 @@ class State:
     def update_done(self, key: str, channels: list[str], how: str) -> None:
         self.db.execute("UPDATE done SET channels=?, how=? WHERE key=?", (json.dumps(channels), how, key))
         self.db.commit()
+
+    def done_keys(self) -> list[str]:
+        return [r[0] for r in self.db.execute("SELECT key FROM done").fetchall()]
+
+    def drop_done(self, key: str) -> None:
+        self.db.execute("DELETE FROM done WHERE key=?", (key,))
+        self.db.commit()

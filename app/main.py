@@ -203,6 +203,12 @@ class Allocator(discord.Client):
                     if s.startswith(prefix) and s[len(prefix):].isdigit():
                         listed[s[len(prefix):]].append((ch, s))
             present = await self.plex.library_index()
+            # forget placement records of titles deleted from Plex (keeps Recent placements accurate)
+            for k in [k for k in self.state.done_keys() if k not in present]:
+                if not await self.plex.exists(k):
+                    log.info("clean-up: %s is no longer in Plex; forgetting its placement record",
+                             (self.state.get_done(k) or {}).get("label", k))
+                    self.state.drop_done(k)
             # remember names while titles exist, so a deleted title can still be named
             self.state.remember_labels({k: v for k, v in present.items() if k in listed})
             gone = []

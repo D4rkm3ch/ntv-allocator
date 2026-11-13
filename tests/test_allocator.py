@@ -198,8 +198,13 @@ async def run_cleanup():
     def restore(k, lbl): plex[k] = lbl; plex_404.discard(k)
     questions = lambda: [m for m in ch.sent if m["view"] is not None]
 
+    a.state.mark_done("1", "X-Men (2000)", ["app_genre_action"], "approved by dustin")
+    a.state.mark_done("98", "Long Gone (1999)", ["app_genre_action"], "approved by dustin")
+    plex_404.add("98")
     await a.cleanup()                       # all present: names remembered, nothing asked
     check("clean-up: nothing asked while everything is in Plex", not ch.sent)
+    check("clean-up: placement record of a title deleted from Plex is forgotten",
+          a.state.get_done("98") is None and a.state.get_done("1") is not None)
     delete("1"); delete("20")               # a movie on two channels, and a show
     await a.cleanup()
     check("clean-up: nothing asked on the first sighting", not ch.sent)
