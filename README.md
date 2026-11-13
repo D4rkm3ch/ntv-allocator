@@ -3,8 +3,9 @@
 # NostalgiaTV Channel Allocator
 
 Watches Plex and NostalgiaTV, finds shows and movies that have no permanent channel, and places them.
-Confident placements happen automatically; anything uncertain is posted to a Discord channel with a
-channel picker. Your choice is applied as soon as you press Approve. Titles you delete from Plex are
+Every new show or movie is posted to a Discord channel with a short summary and suggested channels
+pre-selected; your choice is applied as soon as you press Approve. New episodes of a show that already
+has a channel need nothing. (Set `AUTO_PLACE=true` to let confident matches be placed without asking.) Titles you delete from Plex are
 offered for removal from their channels, one Discord question per show or movie.
 
 ## What it does and does not do
@@ -33,6 +34,17 @@ offered for removal from their channels, one Discord question per show or movie.
    **Skip for now** to decide later. A skipped title that still has no channel after `REASK_DAYS`
    (default 30) is asked about again, once. Open questions are never re-posted.
 5. Clean-up: titles deleted from Plex are offered for removal in Discord (see below).
+
+## Status page: recent placements and the library
+
+- **Recent placements** (status page): everything placed in the last 14 days, how it was placed, and an
+  Edit button.
+- **Library** (`/library`): every show and movie in the managed libraries, shows listed once (no seasons
+  or episodes). Search, filter by library or channel, or show only titles with no channel, and edit any.
+- Editing needs `STATUS_EDIT_KEY` (set it in `.env`); the page asks for it once per browser. Without it the
+  pages are read-only. Adds use NostalgiaTV's add-to-channel and clear an old exclusion; removals rewrite
+  the channel's manual list so no exclusion is left behind (custom channels use remove-from-channel).
+- Taking every channel off a title sends it back to Discord as a question on the next scan.
 
 ## Clean-up of deleted titles
 

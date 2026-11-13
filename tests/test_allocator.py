@@ -81,12 +81,14 @@ def make(keys):
     from collections import deque
     a.cfg, a.checks, a.last_scan, a.scan_summary, a.next_run = M.CFG, {}, {}, "", None
     a.recent_events, a.started, a.mass_warned = deque(maxlen=50), time.time(), False
+    a.library_cache = (0.0, [])
     ch = Chan()
     async def _channel(): return ch
     a._channel = _channel
     return a, ch
 
 async def run():
+    M.CFG["auto_place"] = True          # these checks cover the optional automatic mode
     a, ch = make(["1","2","3","4","5"])
     await a.scan()
     adds = [c for c in a.ntv.calls if c[0] == "add"]
@@ -346,6 +348,7 @@ def run_status():
     from app import status
     a, ch = make([])
     a.ntv.profile_id = "ac80"
+    a.state = M.State(tmp + "/status.db")
     a.is_ready = lambda: True; a.is_closed = lambda: False
     a.checks = {"Plex": {"ok": True, "at": time.time()},
                 "NostalgiaTV": {"ok": False, "at": time.time(), "reason": "is not reachable at http://n", "since": time.time() - 300}}
@@ -364,6 +367,88 @@ def run_status():
     check("status: overall ok when everything works", status.snapshot(a)["overall"] == "ok")
     import json; json.dumps(status.snapshot(a))
     check("status: JSON endpoint data is serialisable", True)
+
+async def run_ask_all():
+    """Default: nothing is placed automatically; confident picks are pre-selected in the question."""
+    M.CFG["auto_place"] = False; M.CFG["dry_run"] = False
+    os.environ["STATE_PATH"] = tmp + "/ask.db"
+    a, ch = make(["1"]); a.state = M.State(tmp + "/ask.db")
+    await a.scan()
+    check("ask-all: nothing added to NostalgiaTV for a confident title", not [c for c in a.ntv.calls if c[0] == "add"])
+    p1 = a.state.get_pending("1")
+    check("ask-all: X-Men asked with the rule's three picks pre-selected (agreed channel first)",
+          p1 and p1["suggested"] == ["app_genre_action", "app_genre_superhero", "app_lackluster"])
+    q = [m for m in ch.sent if m["view"] is not None]
+    check("ask-all: question carries the title summary", len(q) == 1 and q[0]["embed"].title.startswith("X-Men"))
+
+async def run_edit():
+    M.CFG["dry_run"] = False
+    a, ch = make([]); a.state = M.State(tmp + "/edit.db")
+    a.state.mark_done("50", "Planet Doc (2026)", ["app_animal_globe", "custom_teletoon"], "auto")
+    manual = {"app_animal_globe": ["MID:50", "MID:9"], "custom_teletoon": ["MID:50"], "app_docu": [], "app_genre_action": []}
+    excluded = {"app_docu": ["MID:50"], "app_animal_globe": [], "custom_teletoon": [], "app_genre_action": []}
+    calls = []
+    a.ntv.lists_and_exclusions = lambda: _ret(({k: list(v) for k, v in manual.items()}, {k: list(v) for k, v in excluded.items()}, {"custom_teletoon"}))
+    async def so(ch_, **f): calls.append(("override", ch_, f))
+    async def rm(ch_, k): calls.append(("remove", ch_, k))
+    async def add(ch_, keys): calls.append(("add", ch_, tuple(keys))); return {"ratingKeys": keys, "refused": []}
+    async def bk(): calls.append(("backup",))
+    async def rf(ch_): calls.append(("refresh", ch_))
+    a.ntv.set_override, a.ntv.remove_from_channel, a.ntv.add_to_channel, a.ntv.backup, a.ntv.refresh_channel = so, rm, add, bk, rf
+    names = a.rules.names
+    if "app_docu" not in names: names["app_docu"] = "Docu"
+    if "app_animal_globe" not in names: names["app_animal_globe"] = "Animal Globe"
+    res = await a.edit_placement("50", ["app_docu"])
+    check("edit: built-in channel removal rewrites the manual list (no exclusion)",
+          ("override", "app_animal_globe", {"customMediaRatingKeys": ["MID:9"]}) in calls)
+    check("edit: custom channel removal uses remove-from-channel", ("remove", "custom_teletoon", "MID:50") in calls)
+    check("edit: new channel added and its old exclusion cleared",
+          ("add", "app_docu", ("MID:50",)) in calls and ("override", "app_docu", {"excludedMediaRatingKeys": []}) in calls)
+    check("edit: backup first and touched channels refreshed",
+          calls[0] == ("backup",) and {c[1] for c in calls if c[0] == "refresh"} == {"app_docu", "app_animal_globe", "custom_teletoon"})
+    d = a.state.get_done("50")
+    check("edit: record updated and marked as edited", d["channels"] == ["app_docu"] and d["how"].endswith("(edited on status page)") and res["ok"])
+    calls.clear(); manual["app_docu"] = ["MID:50"]; manual["app_animal_globe"] = ["MID:9"]; manual["custom_teletoon"] = []
+    res = await a.edit_placement("50", ["app_docu"])
+    check("edit: no change makes no calls", not calls and res["message"] == "No change.")
+
+    # status endpoints: read is open, editing needs the key
+    from app import status
+    import httpx
+    a.is_ready = lambda: True; a.is_closed = lambda: False; a.ntv.profile_id = "p"
+    a.current_channels = lambda k: _ret(["app_docu"])
+    M.CFG["edit_key"] = "s3cret"
+    await status.start(a, 19873)
+    async with httpx.AsyncClient() as c:
+        page = (await c.get("http://127.0.0.1:19873/")).text
+        g = (await c.get("http://127.0.0.1:19873/api/placements/50")).json()
+        no = await c.post("http://127.0.0.1:19873/api/placements/50", json={"channels": []})
+        bad = await c.post("http://127.0.0.1:19873/api/placements/50", json={"channels": []}, headers={"X-Edit-Key": "nope"})
+        ok = await c.post("http://127.0.0.1:19873/api/placements/50", json={"channels": ["app_docu"]}, headers={"X-Edit-Key": "s3cret"})
+    check("status: Recent placements section lists the title with an Edit button",
+          "Recent placements" in page and "Planet Doc (2026)" in page and "class=edit" in page)
+    check("status: placement lookup returns current channels and alphabetical options",
+          g["current"] == ["app_docu"] and len(g["options"]) == len(a.rules.names))
+    check("status: editing refused without the key or with a wrong key", no.status_code == 403 and bad.status_code == 403)
+    check("status: editing allowed with the key", ok.status_code == 200 and ok.json()["ok"])
+    # library page and data
+    async def items(ign): return [{"key": "50", "label": "Planet Doc (2026)", "library": "Documentary Shows", "type": "show", "added": 0},
+                                  {"key": "51", "label": "The Office (US) (2005)", "library": "TV Shows", "type": "show", "added": 0},
+                                  {"key": "52", "label": "Orphan Film (2020)", "library": "Movies", "type": "movie", "added": 0}]
+    a.plex.library_items = items
+    manual.update({"app_docu": ["MID:50"], "app_comedy_middle": ["MID:51"]})
+    a.library_cache = (0.0, [])
+    async with httpx.AsyncClient() as c:
+        lp = (await c.get("http://127.0.0.1:19873/library")).text
+        lib = (await c.get("http://127.0.0.1:19873/api/library")).json()
+    check("library: page served with search and filters", "id=q" in lp and "No channel" in lp and "/api/library" in lp)
+    byk = {i["key"]: i for i in lib["items"]}
+    check("library: every title listed once with its current channels",
+          len(lib["items"]) == 3 and byk["50"]["channels"] == ["app_docu"] and byk["52"]["channels"] == []
+          and byk["51"]["names"] == [a.rules.names["app_comedy_middle"]])
+    check("library: sorted ignoring a leading 'The', libraries listed",
+          [i["label"] for i in lib["items"]][-1] == "Planet Doc (2026)" and lib["libraries"] == ["Documentary Shows", "Movies", "TV Shows"])
+    M.CFG["edit_key"] = ""
 
 def run_profile():
     from app.clients import choose_profile
@@ -390,5 +475,7 @@ asyncio.run(run_cleanup())
 run_profile()
 asyncio.run(run_health())
 run_status()
+asyncio.run(run_ask_all())
+asyncio.run(run_edit())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

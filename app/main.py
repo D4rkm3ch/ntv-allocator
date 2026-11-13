@@ -40,6 +40,9 @@ CFG = {
     "dry_run": env("DRY_RUN", "false").lower() in ("1", "true", "yes"),
     "rules": env("RULES_PATH", "/config/rules.yaml"), "state": env("STATE_PATH", "/data/state.db"),
     "status_port": int(env("STATUS_PORT", "19860") or 0),
+    # off by default: every new show or movie is asked about in Discord
+    "auto_place": env("AUTO_PLACE", "false").lower() in ("1", "true", "yes"),
+    "edit_key": env("STATUS_EDIT_KEY", ""),
 }
 
 
@@ -65,6 +68,7 @@ class Allocator(discord.Client):
         self.next_run: float | None = None
         self.recent_events: deque = deque(maxlen=50)
         self.started = time.time()
+        self.library_cache: tuple[float, list[dict]] = (0.0, [])
 
     def note(self, text: str) -> None:
         """Recent activity for the status page."""
@@ -324,6 +328,95 @@ class Allocator(discord.Client):
         self.missing_since.pop(key, None)
         await it.message.edit(content=f"**{r['label']}**: removed from {self._names(done)}.", view=None)
 
+    async def edit_placement(self, key: str, channels: list[str]) -> dict:
+        """Change which channels a placed title is on (from the status page). Adds use NostalgiaTV's
+        add-to-channel and clear any exclusion; removals rewrite the channel's manual list (built-in
+        channels) so no exclusion is created, or use remove-from-channel (custom channels)."""
+        channels = [c for c in dict.fromkeys(channels) if c in self.rules.names]
+        async with self.lock:
+            row = self.state.get_done(key)
+            label = row["label"] if row else (self.titles[key].label if key in self.titles else
+                                              next((i["label"] for i in self.library_cache[1] if i["key"] == key), key))
+            stored = self.plex.qualified(key)
+            manual, excluded, custom = await self.ntv.lists_and_exclusions()
+            current = [c for c in self.rules.names if stored in manual.get(c, [])]
+            add = [c for c in channels if c not in current]
+            drop = [c for c in current if c not in channels]
+            if not add and not drop:
+                return {"ok": True, "message": "No change.", "channels": current}
+            if CFG["dry_run"]:
+                return {"ok": True, "message": "Dry run: nothing changed.", "channels": current}
+            await self.ntv.backup()
+            done_add, done_drop, problems = [], [], []
+            for c in add:
+                try:
+                    res = await self.ntv.add_to_channel(c, [stored])
+                    if any(str(r.get("ratingKey")) == stored for r in (res or {}).get("refused") or []):
+                        reason = next(r.get("reason") for r in res["refused"] if str(r.get("ratingKey")) == stored)
+                        problems.append(f"{self.rules.names[c]} refused it ({reason})"); continue
+                    done_add.append(c)
+                    if stored in excluded.get(c, []):
+                        if c in custom:
+                            problems.append(f"{self.rules.names[c]} still excludes it; re-enable it in NostalgiaTV's channel editor")
+                        else:
+                            await self.ntv.set_override(c, excludedMediaRatingKeys=[k for k in excluded[c] if k != stored])
+                except Exception as exc:
+                    log.exception("status page: adding %s to %s failed", label, c)
+                    problems.append(f"could not add to {self.rules.names[c]} ({type(exc).__name__})")
+            for c in drop:
+                try:
+                    if c in custom:
+                        await self.ntv.remove_from_channel(c, stored)
+                    else:
+                        await self.ntv.set_override(c, customMediaRatingKeys=[k for k in manual.get(c, []) if k != stored])
+                    done_drop.append(c)
+                except Exception as exc:
+                    log.exception("status page: removing %s from %s failed", label, c)
+                    problems.append(f"could not remove from {self.rules.names[c]} ({type(exc).__name__})")
+            for c in done_add + done_drop:
+                try:
+                    await self.ntv.refresh_channel(c)
+                except Exception:
+                    log.warning("could not refresh %s", c)
+            final = [c for c in current if c not in done_drop] + done_add
+            how = (row["how"] if row else "manual")
+            how = how if how.endswith("(edited on status page)") else f"{how} (edited on status page)"
+            self.state.update_done(key, final, how) if row else self.state.mark_done(key, label, final, how)
+            parts = []
+            if done_add: parts.append("added to " + self._names(done_add))
+            if done_drop: parts.append("removed from " + self._names(done_drop))
+            msg = f"{label}: " + ("; ".join(parts) if parts else "nothing changed")
+            self.note(msg + " (status page)")
+            log.info("status page edit: %s%s", msg, f"; problems: {problems}" if problems else "")
+            # keep the library view in step with the change
+            for it in self.library_cache[1]:
+                if it["key"] == key:
+                    it["channels"] = final
+            return {"ok": not problems, "message": msg + (". " + "; ".join(problems) if problems else "."), "channels": final}
+
+    async def library_view(self, max_age: float = 60) -> list[dict]:
+        """All managed shows and movies with their current catalogue channels (cached briefly)."""
+        if time.time() - self.library_cache[0] < max_age and self.library_cache[1]:
+            return self.library_cache[1]
+        items = await self.plex.library_items(self.rules.ignore_libraries)
+        manual, _, _ = await self.ntv.lists_and_exclusions()
+        on: dict[str, list[str]] = defaultdict(list)
+        prefix = f"{self.plex.machine_id}:"
+        for ch in self.rules.names:
+            for k in manual.get(ch, []):
+                if k.startswith(prefix):
+                    on[k[len(prefix):]].append(ch)
+        for it in items:
+            it["channels"] = on.get(it["key"], [])
+        items.sort(key=lambda x: (x["label"].casefold()[4:] if x["label"].casefold().startswith("the ") else x["label"].casefold()))
+        self.library_cache = (time.time(), items)
+        return items
+
+    async def current_channels(self, key: str) -> list[str]:
+        manual, _, _ = await self.ntv.lists_and_exclusions()
+        stored = self.plex.qualified(key)
+        return [c for c in self.rules.names if stored in manual.get(c, [])]
+
     async def _evaluate(self, key: str, config_homes: dict, manual: set, hidden: set, auto: dict) -> None:
         t = await self.plex.title(key)
         if t is None or t.library in self.rules.ignore_libraries:
@@ -349,13 +442,15 @@ class Allocator(discord.Client):
             self.state.mark_done(key, t.label, homes, "already placed")
             return
         p = self.rules.place(t)
-        if p.auto and p.channels:
+        if p.auto and p.channels and CFG["auto_place"]:
             log.info("%s: automatic -> %s", t.label, p.channels)
             auto[key] = p.channels
             return
-        # question: channels both agree on first, then NostalgiaTV's hints, then the rules' picks
+        # question: channels both agree on first; a confident rule's picks come next, otherwise
+        # NostalgiaTV's hints, then the remaining picks
         both = [c for c in p.channels if c in hints]
-        suggested = list(dict.fromkeys(both + hints + p.channels))[: self.rules.max]
+        order = both + (p.channels + hints if p.auto else hints + p.channels)
+        suggested = list(dict.fromkeys(order))[: self.rules.max]
         log.info("%s: ask in Discord -> %s (rules %s, NostalgiaTV hints %s)", t.label,
                  suggested or "no suggestion", p.channels, hints)
         self.state.add_pending(key, t.label, suggested)
@@ -427,7 +522,10 @@ class Allocator(discord.Client):
             self.state.mark_skipped(key, pend["label"])
             return
         self.titles[key] = t
-        embed = discord.Embed(title=t.label, description=(t.summary[:300] + "...") if len(t.summary) > 300 else t.summary)
+        summary = t.summary.strip()
+        if len(summary) > 240:                       # a short summary: cut at a word boundary
+            summary = summary[:240].rsplit(" ", 1)[0].rstrip(",;:-") + "..."
+        embed = discord.Embed(title=t.label, description=summary or "No summary in Plex.")
         embed.add_field(name="Library", value=t.library or "-")
         embed.add_field(name="Rating", value=t.rating or "-")
         embed.add_field(name="Studio", value=t.studio or "-")

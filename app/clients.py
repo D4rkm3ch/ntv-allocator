@@ -83,6 +83,21 @@ class Plex:
                 out[str(m["ratingKey"])] = f"{m.get('title', '')} ({m['year']})" if m.get("year") else m.get("title", "")
         return out
 
+    async def library_items(self, ignore: set[str]) -> list[dict]:
+        """Every show and movie (shows as one item) in the libraries the allocator manages."""
+        out = []
+        for sid, sec in self.sections.items():
+            if sec["type"] not in ("show", "movie") or sec["title"] in ignore:
+                continue
+            t = 1 if sec["type"] == "movie" else 2
+            r = await self.http.get(f"{self.url}/library/sections/{sid}/all?type={t}", headers=self.h)
+            r.raise_for_status()
+            for m in r.json()["MediaContainer"].get("Metadata", []):
+                label = f"{m.get('title', '')} ({m['year']})" if m.get("year") else m.get("title", "")
+                out.append({"key": str(m["ratingKey"]), "label": label, "library": sec["title"], "type": sec["type"],
+                            "added": m.get("addedAt", 0)})
+        return out
+
     async def exists(self, key: str) -> bool:
         """False only when Plex answers 404 for the item; any other failure raises."""
         r = await self.http.get(f"{self.url}/library/metadata/{key}", headers=self.h)
@@ -218,6 +233,25 @@ class NostalgiaTV:
             if k and title:
                 out[k] = f"{title} ({year})" if year else title
         return out
+
+    async def lists_and_exclusions(self) -> tuple[dict[str, list[str]], dict[str, list[str]], set[str]]:
+        """(manual lists, excluded keys, custom channel ids) from the live config export."""
+        cfg = await self._req("GET", "/api/config/export")
+        manual: dict[str, list[str]] = {}; excluded: dict[str, list[str]] = {}; custom: set[str] = set()
+        for ch, o in (cfg.get("channelOverrides") or {}).items():
+            manual[ch] = [str(k) for k in o.get("customMediaRatingKeys") or []]
+            excluded[ch] = [str(k) for k in o.get("excludedMediaRatingKeys") or []]
+        for c in cfg.get("customChannels") or []:
+            if c.get("stableId"):
+                custom.add(c["stableId"])
+                manual[c["stableId"]] = [str(k) for k in c.get("customMediaRatingKeys") or []]
+                excluded[c["stableId"]] = [str(k) for k in c.get("excludedMediaRatingKeys") or []]
+        return manual, excluded, custom
+
+    async def set_override(self, channel_id: str, **fields) -> None:
+        """Partial channel override update (only the given fields change). Used to edit a built-in
+        channel's manual list without adding an exclusion, which remove-from-channel would."""
+        await self._req("POST", f"/api/channels/{channel_id}/override", json=fields)
 
     async def remove_from_channel(self, channel_id: str, stored_key: str) -> None:
         await self._req("POST", "/api/watch/remove-from-channel",

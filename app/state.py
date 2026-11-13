@@ -153,3 +153,18 @@ class State:
 
     def count_done(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM done").fetchone()[0]
+
+    # recent placements for the status page -----------------------------------------
+    def recent_placements(self, days: int = 14, limit: int = 100) -> list[dict]:
+        rows = self.db.execute("SELECT key,label,channels,how,at FROM done WHERE how NOT LIKE 'already placed%' "
+                               "AND how NOT LIKE 'dry run%' AND at >= ? ORDER BY at DESC LIMIT ?",
+                               (time.time() - days * 86400, limit)).fetchall()
+        return [{"key": r[0], "label": r[1], "channels": json.loads(r[2]), "how": r[3], "at": r[4]} for r in rows]
+
+    def get_done(self, key: str) -> dict | None:
+        r = self.db.execute("SELECT key,label,channels,how,at FROM done WHERE key=?", (key,)).fetchone()
+        return {"key": r[0], "label": r[1], "channels": json.loads(r[2]), "how": r[3], "at": r[4]} if r else None
+
+    def update_done(self, key: str, channels: list[str], how: str) -> None:
+        self.db.execute("UPDATE done SET channels=?, how=? WHERE key=?", (json.dumps(channels), how, key))
+        self.db.commit()
