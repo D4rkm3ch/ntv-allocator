@@ -96,17 +96,12 @@ def render(s: dict) -> str:
         for x in s["services"])
     acts = "".join(f"<tr><td class=nowrap>{e(_t(x['at']))}</td><td>{e(x['text'])}</td></tr>" for x in s["activity"]) \
         or '<tr><td colspan=2 class=dim>Nothing yet since the container started.</td></tr>'
-    def how_label(h):
-        h = h or ""
-        base = "Automatic" if h.startswith("auto") else ("Approved by " + h.split("approved by ", 1)[1].split(" (")[0]
-                                                         if "approved by " in h else h)
-        return base + (" (edited)" if "edited on status page" in h else "")
     prow = "".join(
         f'<tr data-key="{e(p["key"])}"><td class=nowrap>{e(_t(p["at"]))}</td><td>{e(p["label"])}</td>'
-        f'<td class=chans>{e(", ".join(p["names"]) or "-")}</td><td class=dim>{e(how_label(p["how"]))}</td>'
+        f'<td class=chans>{e(", ".join(p["names"]) or "-")}</td>'
         f'<td>{"<button class=edit type=button>Edit</button>" if s["editable"] else ""}</td></tr>'
         for p in s["placements"])
-    places = (f'<table class=places><tr><th>When</th><th>Title</th><th>Channels</th><th>How</th><th></th></tr>{prow}</table>'
+    places = (f'<table class=places><tr><th>When</th><th>Title</th><th>Channels</th><th></th></tr>{prow}</table>'
               if prow else '<p class=dim>Nothing placed yet.</p>')
     if not s["editable"]:
         places += '<p class=dim>Editing is off. Set STATUS_EDIT_KEY in the container environment to fix placements here.</p>'
