@@ -533,6 +533,28 @@ async def run_edit():
     check("library: sorted ignoring a leading 'The', libraries listed",
           [i["label"] for i in lib["items"]][-1] == "Planet Doc (2026)" and lib["libraries"] == ["Documentary Shows", "Movies", "TV Shows"])
 
+async def run_names():
+    a, ch = make([])
+    before = dict(a.rules.names)
+    a.ntv.channel_names = lambda: _ret({"channels": None} and {"app_nb_sea": "NBC", "app_comedy_middle": "Comedy Central", "not_in_catalogue": "X"})
+    await a.refresh_names()
+    check("names: catalogue channels take NostalgiaTV's current names", a.rules.names["app_nb_sea"] == "NBC"
+          and a.rules.names["app_comedy_middle"] == "Comedy Central" and "not_in_catalogue" not in a.rules.names)
+    async def boom(): raise RuntimeError("down")
+    a.ntv.channel_names = boom
+    await a.refresh_names()
+    check("names: a failed read keeps the current names", a.rules.names["app_nb_sea"] == "NBC")
+    from app.clients import NostalgiaTV
+    n = NostalgiaTV.__new__(NostalgiaTV)
+    async def req(m, path, **kw): return {"channels": [{"stableId": "app_nb_sea", "name": "NB Sea", "customName": "NBC"},
+                                                       {"stableId": "custom_x", "name": "Teletoon"}], "channelSortMode": "number"}
+    n._req = req
+    got = await n.channel_names()
+    check("names: list parsed, custom name preferred", got == {"app_nb_sea": "NBC", "custom_x": "Teletoon"})
+    lines = M.setup_banner("ABCD-EFGH", "FIRST-TIME SETUP", "text")
+    check("log: setup code printed in a banner block", any("ABCD-EFGH" in l for l in lines) and lines.count("") >= 4)
+    a.rules.names.clear(); a.rules.names.update(before)
+
 def run_profile():
     from app.clients import choose_profile
     check("profile: the only real profile is chosen (legacy blank entry ignored)",
@@ -561,6 +583,7 @@ run_status()
 asyncio.run(run_ask_all())
 asyncio.run(run_edit())
 run_settings_auth()
+asyncio.run(run_names())
 asyncio.run(run_apply_settings())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

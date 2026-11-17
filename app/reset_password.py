@@ -12,8 +12,12 @@ from .state import State
 def main() -> None:
     state = State(os.getenv("STATE_PATH", "/data/state.db"))
     code = Auth(state).reset()
-    print("The status page password has been cleared and all sessions signed out.")
-    print(f"Open the status page and create a new password with setup code: {code}")
+    bar = "#" * 64
+    print("\n".join(["", bar, "#", "#   PASSWORD RESET", "#",
+                      "#   The status page password is cleared and all sessions are signed out.",
+                      "#   Placements and settings are kept.", "#",
+                      "#   Open the status page and create a new password with this code:", "#",
+                      f"#        SETUP CODE:   {code}", "#", bar, ""]))
 
 
 if __name__ == "__main__":

@@ -44,6 +44,12 @@ CFG = {
 }
 
 
+def setup_banner(code: str, title: str, text: str) -> list[str]:
+    """A block that stands out when scrolling the container log."""
+    bar = "#" * 64
+    return ["", "", bar, "#", f"#   {title}", "#", f"#   {text}", "#", f"#        SETUP CODE:   {code}", "#", bar, "", ""]
+
+
 class Allocator(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
@@ -69,6 +75,20 @@ class Allocator(discord.Client):
         self.recent_events: deque = deque(maxlen=50)
         self.started = time.time()
         self.library_cache: tuple[float, list[dict]] = (0.0, [])
+
+    async def refresh_names(self) -> None:
+        """Show channels by the names NostalgiaTV uses now (rules.yaml only decides which channels are
+        offered). On any error the previous names are kept."""
+        try:
+            live = await self.ntv.channel_names()
+        except Exception as exc:
+            log.warning("could not read channel names from NostalgiaTV (%s); keeping current names", type(exc).__name__)
+            return
+        changed = [(c, self.rules.names[c], live[c]) for c in self.rules.names if c in live and live[c] != self.rules.names[c]]
+        for c, old, new in changed:
+            self.rules.names[c] = new
+        if changed:
+            log.info("channel names from NostalgiaTV: %s", ", ".join(f"{old} -> {new}" for _, old, new in changed))
 
     async def apply_settings(self, clean: dict) -> list[str]:
         """Save settings from the status page and apply them at once. Returns labels of what changed."""
@@ -97,8 +117,9 @@ class Allocator(discord.Client):
             log.info("settings stored for the first time (now edited on the status page): %s",
                      ", ".join(f"{k}={CFG[k]}" for k in self.seeded))
         if not self.auth.is_set_up():
-            log.info("FIRST-TIME SETUP: open the status page and create the admin password with setup code %s",
-                     self.auth.setup_code())
+            for line in setup_banner(self.auth.setup_code(), "FIRST-TIME SETUP",
+                                     "Open the status page and create the admin password with this code:"):
+                log.info(line)
         if CFG["dry_run"]:
             log.info("dry run is on: nothing will change in NostalgiaTV until it is turned off on the status page")
         if not CFG["dry_run"]:
@@ -158,6 +179,7 @@ class Allocator(discord.Client):
         the cycle ran normally (so the next one waits the full interval)."""
         if not await self._probe():
             return False
+        await self.refresh_names()
         try:
             await self.scan()
             if CFG["cleanup"]:

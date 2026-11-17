@@ -234,6 +234,26 @@ class NostalgiaTV:
                 out[k] = f"{title} ({year})" if year else title
         return out
 
+    async def channel_names(self) -> dict[str, str]:
+        """Channel id -> the name NostalgiaTV currently shows (overrides applied)."""
+        data = await self._req("GET", "/api/channels/")
+        names: dict[str, str] = {}
+
+        def walk(x):
+            if isinstance(x, dict):
+                sid = x.get("stableId") or x.get("id")
+                name = x.get("customName") or x.get("name") or x.get("displayName") or x.get("title")
+                if isinstance(sid, str) and isinstance(name, str) and name.strip():
+                    names.setdefault(sid, name.strip())
+                for v in x.values():
+                    if isinstance(v, (list, dict)):
+                        walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+        walk(data)
+        return names
+
     async def lists_and_exclusions(self) -> tuple[dict[str, list[str]], dict[str, list[str]], set[str]]:
         """(manual lists, excluded keys, custom channel ids) from the live config export."""
         cfg = await self._req("GET", "/api/config/export")
