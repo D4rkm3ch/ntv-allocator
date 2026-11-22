@@ -84,6 +84,8 @@ def make(keys):
     a.recent_events, a.started, a.mass_warned = deque(maxlen=50), time.time(), False
     a.library_cache = (0.0, [])
     a.seasonal_last, a.seasonal_running, a.place_last, a.place_running = {}, False, {}, False
+    a.seasonal_active = {}
+    a.background = set()
     a.auth = M.Auth(a.state); a.wake = asyncio.Event(); a.seeded = []
     a.health = M.Health(threshold=M.CFG["alert_after"], remind_hours=M.CFG["alert_remind"])
     ch = Chan()
@@ -714,6 +716,71 @@ async def run_autoplace():
     check("undo: question posted", any((m["content"] or "").startswith("**Where should this go?") for m in ch.sent[-2:]))
     M.CFG["auto_place"] = False
 
+async def run_combined():
+    """A movie's placement question also asks whether it is seasonal."""
+    from app.rules import Placement
+    a, ch = make([]); a.state = M.State(tmp + "/comb.db")
+    M.CFG["dry_run"] = False; M.CFG["auto_place"] = False
+    TT = {"f1": Title("f1","movie","Elf",2003,"Movies","x","PG",["Comedy"],"Buddy saves Christmas."),
+          "f2": Title("f2","movie","Jingle Christmas",2020,"Movies","x","PG",["Comedy"],""),
+          "f3": Title("f3","movie","Die Hard",1988,"Movies","x","R",["Action"],"A Christmas party.")}
+    async def title(k): return TT.get(k)
+    a.plex.title = title
+    a.plex.keys = ["f1", "f2", "f3"]
+    a.rules.place = lambda t: Placement(["app_genre_action"], False, [])
+    async def cc(q): return []
+    a.ntv.channels_containing = cc
+    async def homes(nah): return {}, {"app_genre_action"}, set()
+    a.ntv.config_homes = homes
+    calls = []
+    a.plex.sections = {"6": {"title": "Movies", "type": "movie"}}
+    lib = [{"key": k, "label": TT[k].label, "title": TT[k].title, "summary": TT[k].summary, "type": 1} for k in TT]
+    async def media_items(sid, days=None): return lib
+    async def collections(sid): return {"christmas": "C6"}
+    async def collection_keys(cid): return set()
+    async def add_to_collection(cid, key): calls.append(("add", cid, key))
+    async def remove_from_collection(cid, key): calls.append(("remove", cid, key))
+    for f in (media_items, collections, collection_keys, add_to_collection, remove_from_collection):
+        setattr(a.plex, f.__name__, f)
+    ww = {"stableId": "custom_ww", "name": "Winter Wonderland", "collectionNames": ["Christmas"], "collectionIds": ["MID:C6"]}
+    async def seasonal_channels(names): return {n: ([ww] if n == "Christmas" else []) for n in names}
+    a.ntv.seasonal_channels = seasonal_channels
+    edits = []
+    class FakeMsg:
+        def __init__(s, mid): s.mid = mid; s.embeds = []
+        async def edit(s, **kw): edits.append((s.mid, kw))
+    async def fetch_message(mid): return FakeMsg(mid)
+    ch.fetch_message = fetch_message
+    a.seasonal_active = {"christmas": "Christmas"}
+    await a.scan()
+    await a.seasonal_run("recent", "automatic")
+    q = {m["embed"].title: m for m in ch.sent if (m["content"] or "").startswith("**Where should")}
+    elf_view = q["Elf (2003)"]["view"]
+    ssel = [c for c in elf_view.children if getattr(c, "custom_id", "").startswith("ntva:ssel:")]
+    check("combined: movie question has a seasonal picker", len(ssel) == 1)
+    check("combined: possible match not asked separately", not any((m["content"] or "").startswith("**Possible Christmas") for m in ch.sent))
+    check("combined: question shows the possible match", any(f.name == "Seasonal" and "Possibly" in f.value for f in q["Elf (2003)"]["embed"].fields))
+    check("combined: clear match added and its question refreshed", ("add", "C6", "f2") in calls and edits
+          and not any((m["content"] or "").startswith("**Added to") for m in ch.sent))
+    check("combined: refreshed picker pre-selects Christmas for the clear match",
+          a._question_seasons(TT["f2"]) == {"christmas"})
+    # Elf: choose Christmas, approve
+    await a.on_interaction(Inter("ntva:ssel:f1", ["christmas"]))
+    it = Inter("ntva:ok:f1"); await a.on_interaction(it)
+    check("combined: approve adds the chosen season", ("add", "C6", "f1") in calls
+          and any("added to the Christmas collection" in str(x) for x in it.log))
+    # Jingle: deselect Christmas, approve -> taken out
+    it0 = Inter("ntva:ssel:f2"); it0.data["values"] = []; await a.on_interaction(it0)
+    it = Inter("ntva:ok:f2"); await a.on_interaction(it)
+    check("combined: deselecting removes the automatic addition", ("remove", "C6", "f2") in calls
+          and a.state.seasonal_get("f2", "christmas")["status"] == "undone")
+    # Die Hard: approve without choosing -> declined, never asked separately
+    it = Inter("ntva:ok:f3"); await a.on_interaction(it)
+    check("combined: unchosen possible match recorded as not seasonal",
+          a.state.seasonal_get("f3", "christmas")["status"] == "declined")
+    await a.seasonal_run("recent", "automatic")
+    check("combined: answered movies not asked again", not any((m["content"] or "").startswith("**Possible Christmas") for m in ch.sent))
+
 def run_profile():
     from app.clients import choose_profile
     check("profile: the only real profile is chosen (legacy blank entry ignored)",
@@ -745,6 +812,7 @@ run_settings_auth()
 asyncio.run(run_names())
 asyncio.run(run_seasonal())
 asyncio.run(run_autoplace())
+asyncio.run(run_combined())
 asyncio.run(run_apply_settings())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

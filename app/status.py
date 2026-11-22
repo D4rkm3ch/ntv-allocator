@@ -9,7 +9,6 @@ Served with aiohttp, which discord.py already depends on.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import html
 import json
@@ -532,7 +531,7 @@ async def start(a, port: int) -> None:
         scope = "all" if data.get("scope") == "all" else "recent"
         if a.seasonal_running:
             return web.json_response({"ok": False, "message": "A check is already running."})
-        asyncio.get_running_loop().create_task(a.seasonal_run(scope, "run by hand"))
+        a.spawn(a.seasonal_run(scope, "run by hand"))
         return web.json_response({"ok": True, "message": "Started. Additions and questions are posted in Discord; "
                                                           "this page shows the result when it finishes."})
 
@@ -541,7 +540,7 @@ async def start(a, port: int) -> None:
             return deny()
         if a.place_running:
             return web.json_response({"ok": False, "message": "A placement run is already running."})
-        asyncio.get_running_loop().create_task(a.place_run("run by hand"))
+        a.spawn(a.place_run("run by hand"))
         return web.json_response({"ok": True, "message": "Started. Placements are posted in Discord with Undo; "
                                                           "this page shows the result when it finishes."})
 

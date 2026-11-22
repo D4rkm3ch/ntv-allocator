@@ -55,6 +55,17 @@ class State:
         return {"key": row[0], "label": row[1], "suggested": json.loads(row[2]), "selected": json.loads(row[3]),
                 "message_id": row[4]}
 
+    def get_meta(self, name: str) -> str | None:
+        r = self.db.execute("SELECT value FROM meta WHERE name=?", (name,)).fetchone()
+        return r[0] if r else None
+
+    def set_meta(self, name: str, value: str | None) -> None:
+        if value is None:
+            self.db.execute("DELETE FROM meta WHERE name=?", (name,))
+        else:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (name, value))
+        self.db.commit()
+
     def count_placed_since(self, how_like: str, since: float) -> int:
         return self.db.execute("SELECT COUNT(*) FROM done WHERE how LIKE ? AND at >= ?", (how_like, since)).fetchone()[0]
 
@@ -253,6 +264,10 @@ class State:
         return {"batch": r[0], "kind": r[1], "season": r[2], "keys": json.loads(r[3]), "selected": json.loads(r[4])}
 
     def seasonal_batch_update(self, batch: str, keys: list[str] | None = None, selected: list[str] | None = None) -> None:
+        if keys == []:                                   # finished: nothing left to act on
+            self.db.execute("DELETE FROM seasonal_batches WHERE batch=?", (batch,))
+            self.db.commit()
+            return
         if keys is not None:
             self.db.execute("UPDATE seasonal_batches SET keys=? WHERE batch=?", (json.dumps(keys), batch))
         if selected is not None:

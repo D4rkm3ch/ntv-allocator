@@ -6,8 +6,10 @@ rules.yaml, and asks in Discord when a placement is not certain.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import signal
 import time
 import uuid
 from collections import defaultdict, deque
@@ -76,8 +78,10 @@ class Allocator(discord.Client):
         self.library_cache: tuple[float, list[dict]] = (0.0, [])
         self.seasonal_last: dict = {}
         self.seasonal_running = False
+        self.seasonal_active: dict[str, str] = {}     # season -> collection name, for seasons with a channel
         self.place_last: dict = {}
         self.place_running = False
+        self.background: set[asyncio.Task] = set()
 
     async def refresh_names(self) -> None:
         """Show channels by the names NostalgiaTV uses now (rules.yaml only decides which channels are
@@ -109,6 +113,13 @@ class Allocator(discord.Client):
         if "interval" in changed or ("dry_run" in changed and not CFG["dry_run"]):
             self.wake.set()                                   # rescan now / use the new interval at once
         return [settings_mod.SPEC[k][0] for k in changed]
+
+    def spawn(self, coro) -> None:
+        """Run work started from the status page in the background, keeping a reference so the
+        task cannot be garbage-collected before it finishes."""
+        task = asyncio.get_running_loop().create_task(coro)
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
 
     def note(self, text: str) -> None:
         """Recent activity for the status page."""
@@ -183,6 +194,12 @@ class Allocator(discord.Client):
         if not await self._probe():
             return False
         await self.refresh_names()
+        if not self.seasonal_active:      # so the first questions after a start offer the seasonal choice
+            try:
+                chans = await self.ntv.seasonal_channels(list(seasonal.SEASONS.values()))
+                self.seasonal_active = {s: n for s, n in seasonal.SEASONS.items() if chans[n]}
+            except Exception:
+                log.warning("could not read the seasonal channels from NostalgiaTV")
         try:
             await self.scan()
             if CFG["cleanup"]:
@@ -715,11 +732,17 @@ class Allocator(discord.Client):
         if trigger != "automatic" or (text != "nothing new" and text != self.seasonal_last.get("summary")):
             log.info("seasonal check (%s, %s): %s", "whole library" if scope == "all" else "recent", trigger, text)
         self.seasonal_last = {"at": time.time(), "scope": scope, "trigger": trigger, "summary": text, "ok": ok}
+        if trigger == "automatic":           # repeated failures reach Discord like scan failures
+            if ok:
+                self.health.ok("Christmas and Halloween check")
+            else:
+                self.health.fail("Christmas and Halloween check", text, threshold=2)
         return text
 
     async def _seasonal(self, scope: str) -> str:
         chans = await self.ntv.seasonal_channels(list(seasonal.SEASONS.values()))
         active = {s: n for s, n in seasonal.SEASONS.items() if chans[n]}
+        self.seasonal_active = active
         if not active:
             return "no NostalgiaTV channel uses a Christmas or Halloween collection"
         ignore = set(self.rules.cfg.get("seasonal_ignore_libraries", seasonal.DEFAULT_IGNORE))
@@ -746,16 +769,26 @@ class Allocator(discord.Client):
                 cid, keys = members[s]
                 if item["key"] in keys:
                     self.state.seasonal_set(item["key"], s, item["label"], sid, "present", cid or "")
+                elif how == "possible" and self.state.get_pending(item["key"]):
+                    continue        # its placement question asks about the season too
                 else:
                     (add if how == "clear" else ask)[s].append((item, sid, sec["title"]))
-        parts = []
+        parts, refresh = [], set()
         for s, name in active.items():
             if add[s]:
-                done = await self._seasonal_add(s, add[s], chans[name])
+                done = await self._seasonal_add(s, add[s], chans[name], post=False)
+                # a movie with an open placement question shows the addition there, not in a new message
+                in_q = {e[0]["key"] for e in done if self.state.get_pending(e[0]["key"])}
+                refresh |= in_q
+                rest = [e for e in done if e[0]["key"] not in in_q]
+                if rest:
+                    await self._seasonal_post_added(s, rest, chans[name])
                 parts.append(f"{len(done)} added to {name}")
             if ask[s]:
                 await self._seasonal_ask(s, ask[s])
                 parts.append(f"{len(ask[s])} possible {name} titles asked in Discord")
+        for k in refresh:
+            await self._refresh_question(k)
         return ("; ".join(parts) + (" (dry run)" if CFG["dry_run"] and parts else "")) if parts else "nothing new"
 
     async def _seasonal_add(self, season: str, entries: list, channels: list[dict], post: bool = True) -> list:
@@ -857,6 +890,83 @@ class Allocator(discord.Client):
             self.state.seasonal_batch_add(batch, "ask", season, [item["key"] for item, _, _ in part])
             for item, sid, _ in part:
                 self.state.seasonal_set(item["key"], season, item["label"], sid, "asked", batch=batch)
+
+    # seasonal choice inside a movie's placement question
+    def _question_seasons(self, t: Title) -> set[str]:
+        """Seasons selected in a movie's question: the viewer's own choice if made, otherwise the
+        seasons it was already added to automatically."""
+        raw = self.state.get_meta(f"qseason:{t.key}")
+        if raw is not None:
+            return set(json.loads(raw)) & set(self.seasonal_active)
+        return {s for s in self.seasonal_active
+                if (self.state.seasonal_get(t.key, s) or {}).get("status") in ("added", "dry run")}
+
+    def _seasonal_note(self, t: Title) -> str:
+        if t.kind != "movie" or not self.seasonal_active:
+            return ""
+        notes = []
+        for s, name in self.seasonal_active.items():
+            st = (self.state.seasonal_get(t.key, s) or {}).get("status")
+            if st in ("added", "dry run", "present"):
+                notes.append(f"In the {name} collection" + (" (added automatically)" if st != "present" else ""))
+            elif seasonal.classify(t.title, t.summary).get(s) == "possible":
+                notes.append(f"Possibly {name}: the summary mentions it")
+        return "\n".join(notes)
+
+    async def _refresh_question(self, key: str) -> None:
+        pend = self.state.get_pending(key)
+        if not pend or not pend["message_id"]:
+            return
+        t = self.titles.get(key) or await self.plex.title(key)
+        if not t:
+            return
+        self.titles[key] = t
+        try:
+            msg = await (await self._channel()).fetch_message(int(pend["message_id"]))
+            embed = msg.embeds[0] if msg.embeds else None
+            if embed is not None:
+                idx = next((i for i, f in enumerate(embed.fields) if f.name == "Seasonal"), None)
+                note = self._seasonal_note(t)
+                if idx is not None:
+                    embed.set_field_at(idx, name="Seasonal", value=note or "-", inline=False)
+                elif note:
+                    embed.add_field(name="Seasonal", value=note, inline=False)
+            await msg.edit(embed=embed, view=self._view(t, pend["selected"]))
+        except Exception:
+            log.warning("could not update the question for %s", t.label)
+
+    async def _apply_question_seasons(self, key: str) -> str:
+        """After Approve: put the movie in, or take it out of, the seasonal collections chosen in its
+        question. Returns text to add to the answered question."""
+        t = self.titles.get(key)
+        if not t or t.kind != "movie" or not self.seasonal_active:
+            return ""
+        want = self._question_seasons(t)
+        sid = next((i for i, sec in self.plex.sections.items() if sec["title"] == t.library), None)
+        out = []
+        for s, name in self.seasonal_active.items():
+            row = self.state.seasonal_get(key, s)
+            st = row["status"] if row else None
+            try:
+                if s in want and st not in ("added", "dry run", "present") and sid:
+                    chans = (await self.ntv.seasonal_channels([name]))[name]
+                    item = {"key": key, "label": t.label, "title": t.title, "type": 1}
+                    if chans and await self._seasonal_add(s, [(item, sid, t.library)], chans, post=False):
+                        out.append(f"added to the {name} collection")
+                elif s not in want and st in ("added", "dry run"):
+                    if st == "added" and row["collection"]:
+                        await self.plex.remove_from_collection(row["collection"], key)
+                        for ch in (await self.ntv.seasonal_channels([name]))[name]:
+                            await self.ntv.refresh_channel(ch["stableId"])
+                    self.state.seasonal_set(key, s, t.label, row["sid"], "undone", row["collection"])
+                    out.append(f"taken out of the {name} collection")
+                elif s not in want and st is None and seasonal.classify(t.title, t.summary).get(s):
+                    self.state.seasonal_set(key, s, t.label, sid or "", "declined")
+            except Exception:
+                log.exception("seasonal choice for %s failed", t.label)
+                out.append(f"could not change the {name} collection (see the log)")
+        self.state.set_meta(f"qseason:{key}", None)
+        return ("; " + "; ".join(out)) if out else ""
 
     async def _seasonal_answer(self, it: discord.Interaction, action: str, batch: str) -> None:
         b = self.state.seasonal_batch(batch)
@@ -964,6 +1074,9 @@ class Allocator(discord.Client):
         embed.add_field(name="Studio", value=t.studio or "-")
         embed.add_field(name="Genres", value=", ".join(t.genres) or "-", inline=False)
         embed.add_field(name="Suggested", value=self._names(pend["suggested"]), inline=False)
+        note = self._seasonal_note(t)
+        if note:
+            embed.add_field(name="Seasonal", value=note, inline=False)
         embed.set_footer(text="Choose up to 3 channels, then Approve, or Skip for now.")
         msg = await (await self._channel()).send("**Where should this go?**", embed=embed, view=self._view(t, pend["selected"]))
         self.note(f"Asked where {t.label} should go")
@@ -976,6 +1089,13 @@ class Allocator(discord.Client):
                 for cid, name in choices]
         v.add_item(discord.ui.Select(custom_id=f"ntva:sel:{t.key}", placeholder="Pick channels",
                                      min_values=1, max_values=min(self.rules.max, len(opts)), options=opts))
+        if t.kind == "movie" and self.seasonal_active:
+            chosen = self._question_seasons(t)
+            v.add_item(discord.ui.Select(
+                custom_id=f"ntva:ssel:{t.key}", placeholder="Seasonal channel: not seasonal", min_values=0,
+                max_values=len(self.seasonal_active),
+                options=[discord.SelectOption(label=f"Seasonal: {name}", value=s, default=s in chosen)
+                         for s, name in self.seasonal_active.items()]))
         v.add_item(discord.ui.Button(custom_id=f"ntva:ok:{t.key}", label="Approve", style=discord.ButtonStyle.success))
         v.add_item(discord.ui.Button(custom_id=f"ntva:skip:{t.key}", label="Skip for now",
                                      style=discord.ButtonStyle.secondary))
@@ -1007,8 +1127,13 @@ class Allocator(discord.Client):
             self.state.set_selected(key, list(it.data.get("values", [])))
             await it.response.defer()
             return
+        if action == "ssel":
+            self.state.set_meta(f"qseason:{key}", json.dumps(list(it.data.get("values", []))))
+            await it.response.defer()
+            return
         if action == "skip":
             self.state.mark_skipped(key, pend["label"])
+            self.state.set_meta(f"qseason:{key}", None)
             await it.response.edit_message(content=f"**{pend['label']}**: skipped for now. "
                                                    f"It is asked about again in {CFG['reask_days']} days if it "
                                                    f"still has no channel.",
@@ -1033,6 +1158,7 @@ class Allocator(discord.Client):
                         if t:
                             self.titles[key] = t
                     accepted = await self.apply({key: chans}, how=f"approved by {it.user.name}")
+                    season_text = await self._apply_question_seasons(key)
             except Exception as exc:
                 log.exception("approval of %s failed", pend["label"])
                 await it.followup.send(f"Could not apply this ({type(exc).__name__}). Nothing was recorded; "
@@ -1041,6 +1167,7 @@ class Allocator(discord.Client):
             done = accepted.get(key) or []
             text = (f"**{pend['label']}**: added to {self._names(done)}" if done
                     else f"**{pend['label']}**: NostalgiaTV refused every channel; it has no channel yet")
+            text += season_text
             await it.message.edit(content=text + (" (dry run, nothing changed)" if CFG["dry_run"] else "") + ".",
                                   embed=None, view=None)
 
@@ -1049,6 +1176,11 @@ def main() -> None:
     missing = [k for k in ("PLEX_URL", "PLEX_TOKEN", "DISCORD_TOKEN", "DISCORD_CHANNEL_ID") if not os.getenv(k)]
     if missing:
         raise SystemExit(f"missing required settings: {', '.join(missing)}")
+    # Docker stops a container with SIGTERM; Python as PID 1 would ignore it and be killed 10 seconds
+    # later (exit 137). Treat it like Ctrl+C so discord.py closes cleanly and at once.
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _stop)
     Allocator().run(CFG["discord_token"], log_handler=None)
 
 

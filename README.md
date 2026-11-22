@@ -111,6 +111,9 @@ The seasonal channels (any custom channel that reads a Plex collection named **C
   title is never added again.
 - A title whose summary mentions the holiday but whose title does not (Elf, Die Hard) is asked
   about in Discord: pick the ones that belong and press Add selected, or None of these.
+- A new movie that is asked about anyway gets both questions in one message: its channel picker plus
+  a seasonal picker. A clear match shows as already selected (deselect it to take it out); a possible
+  match is offered there instead of in a separate message. Approve applies both.
 - Plex collections belong to one library, so a library without a Christmas or Halloween collection
   gets one when its first title is added, and that collection is added to the channel in NostalgiaTV.
 - It always runs on every scan for titles added within the look-back period (there is no switch).
