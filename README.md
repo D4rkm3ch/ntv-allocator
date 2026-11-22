@@ -88,6 +88,25 @@ Plex, NostalgiaTV, Discord and the scans are working (with the reason when not),
 open questions, the last 50 actions, and the main settings. `/api/status` returns the same as JSON for
 Homepage or Home Assistant. It shows no tokens or passwords; keep the port on your LAN.
 
+## Christmas and Halloween
+
+The seasonal channels (any custom channel that reads a Plex collection named **Christmas** or
+**Halloween**) are kept filled automatically:
+
+- A movie or episode with a clear holiday word in its own title (Christmas, Xmas, Halloween,
+  Treehouse of Horror, Trick or Treat and similar) goes straight into that season's collection.
+  Discord gets one message listing what was added, with a picker to undo any of them. An undone
+  title is never added again.
+- A title whose summary mentions the holiday but whose title does not (Elf, Die Hard) is asked
+  about in Discord: pick the ones that belong and press Add selected, or None of these.
+- Plex collections belong to one library, so a library without a Christmas or Halloween collection
+  gets one when its first title is added, and that collection is added to the channel in NostalgiaTV.
+- It runs on every scan for titles added within the look-back period when the switch is on under
+  Settings. The status page can run it by hand at any time, even when the switch is off, for
+  recent titles or for the whole library.
+- Libraries listed under `seasonal_ignore_libraries` in rules.yaml are skipped (default: Classicals,
+  Fan Edits, Reality Shows, Music). Dry run applies: nothing changes in Plex while it is on.
+
 ## Connection alerts
 
 Before every scan the allocator checks that Plex and NostalgiaTV answer an authenticated request.

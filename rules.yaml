@@ -67,6 +67,9 @@ not_a_home:
 
 # Libraries the allocator ignores (YouTube is carried whole by You-Toob).
 ignore_libraries: [YouTube, Classicals, Fan Edits, Reality Shows, Music]
+# Libraries the Christmas and Halloween check ignores (YouTube is included: its holiday episodes
+# can go on the seasonal channels). Leave out to use this default.
+seasonal_ignore_libraries: [Classicals, Fan Edits, Reality Shows, Music]
 
 # Exact-title decisions. Discord approvals are remembered separately in the state database.
 title_overrides: {}

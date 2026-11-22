@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from collections import defaultdict, deque
 
 import discord
@@ -17,7 +18,7 @@ from . import settings as settings_mod
 from .auth import Auth
 from .clients import NostalgiaTV, Plex
 from .health import Health, describe
-from . import status
+from . import seasonal, status
 from .rules import Rules, Title
 from .state import State
 
@@ -75,6 +76,8 @@ class Allocator(discord.Client):
         self.recent_events: deque = deque(maxlen=50)
         self.started = time.time()
         self.library_cache: tuple[float, list[dict]] = (0.0, [])
+        self.seasonal_last: dict = {}
+        self.seasonal_running = False
 
     async def refresh_names(self) -> None:
         """Show channels by the names NostalgiaTV uses now (rules.yaml only decides which channels are
@@ -191,6 +194,8 @@ class Allocator(discord.Client):
             # a one-off error is retried quietly; two in a row is reported
             self.health.fail("Allocator scans", describe(exc) + " (details in the container log)", threshold=2)
             self.last_scan = {"at": time.time(), "ok": False, "reason": describe(exc)}
+        if CFG["seasonal"]:
+            await self.seasonal_run("recent", "automatic")
         return True
 
     async def _scan_loop(self) -> None:
@@ -559,6 +564,234 @@ class Allocator(discord.Client):
             await (await self._channel()).send("**NostalgiaTV refused**\n" + "\n".join(refusals))
         return accepted
 
+    # ------------------------------------------------------------------ Christmas and Halloween
+    async def seasonal_run(self, scope: str = "recent", trigger: str = "automatic") -> str:
+        """Put clear Christmas/Halloween titles into the seasonal collections and ask about possible
+        ones. scope "recent" checks titles added within the look-back period, "all" every title.
+        Never raises; the outcome is kept for the status page."""
+        if self.seasonal_running:
+            return "A seasonal check is already running."
+        self.seasonal_running = True
+        try:
+            async with self.lock:
+                text = await self._seasonal(scope)
+            ok = True
+        except Exception as exc:
+            log.exception("seasonal check failed")
+            text, ok = f"Failed: {describe(exc)} (details in the container log)", False
+        finally:
+            self.seasonal_running = False
+        if trigger != "automatic" or text != "nothing new":
+            log.info("seasonal check (%s, %s): %s", "whole library" if scope == "all" else "recent", trigger, text)
+        self.seasonal_last = {"at": time.time(), "scope": scope, "trigger": trigger, "summary": text, "ok": ok}
+        return text
+
+    async def _seasonal(self, scope: str) -> str:
+        chans = await self.ntv.seasonal_channels(list(seasonal.SEASONS.values()))
+        active = {s: n for s, n in seasonal.SEASONS.items() if chans[n]}
+        if not active:
+            return "no NostalgiaTV channel uses a Christmas or Halloween collection"
+        ignore = set(self.rules.cfg.get("seasonal_ignore_libraries", seasonal.DEFAULT_IGNORE))
+        days = None if scope == "all" else CFG["lookback"]
+        known = {s: self.state.seasonal_known(s) for s in active}
+        add: dict[str, list] = {s: [] for s in active}
+        ask: dict[str, list] = {s: [] for s in active}
+        for sid, sec in self.plex.sections.items():
+            if sec["type"] not in ("show", "movie") or sec["title"] in ignore:
+                continue
+            hits = []
+            for item in await self.plex.media_items(sid, days):
+                for s, how in seasonal.classify(item["title"], item["summary"]).items():
+                    if s in active and item["key"] not in known[s]:
+                        hits.append((s, how, item))
+            if not hits:
+                continue
+            colls = await self.plex.collections(sid)
+            members = {}
+            for s in {h[0] for h in hits}:
+                cid = colls.get(active[s].lower())
+                members[s] = (cid, await self.plex.collection_keys(cid) if cid else set())
+            for s, how, item in hits:
+                cid, keys = members[s]
+                if item["key"] in keys:
+                    self.state.seasonal_set(item["key"], s, item["label"], sid, "present", cid or "")
+                else:
+                    (add if how == "clear" else ask)[s].append((item, sid, sec["title"]))
+        parts = []
+        for s, name in active.items():
+            if add[s]:
+                done = await self._seasonal_add(s, add[s], chans[name])
+                parts.append(f"{len(done)} added to {name}")
+            if ask[s]:
+                await self._seasonal_ask(s, ask[s])
+                parts.append(f"{len(ask[s])} possible {name} titles asked in Discord")
+        return ("; ".join(parts) + (" (dry run)" if CFG["dry_run"] and parts else "")) if parts else "nothing new"
+
+    async def _seasonal_add(self, season: str, entries: list, channels: list[dict], post: bool = True) -> list:
+        """Add (item, library id, library name) entries to the season's collection in each item's
+        library, creating the collection and adding it to the season's channels when needed."""
+        name = seasonal.SEASONS[season]
+        if CFG["dry_run"]:
+            for item, sid, _ in entries:
+                self.state.seasonal_set(item["key"], season, item["label"], sid, "dry run")
+            if post:
+                await self._seasonal_post_added(season, entries, channels)
+            return entries
+        added, backed_up, refresh = [], False, False
+        by_lib: dict[str, list] = defaultdict(list)
+        for e in entries:
+            by_lib[e[1]].append(e)
+        for sid, group in by_lib.items():
+            cid = (await self.plex.collections(sid)).get(name.lower())
+            for item, _, lib in group:
+                try:
+                    if cid:
+                        await self.plex.add_to_collection(cid, item["key"])
+                    else:
+                        cid = await self.plex.create_collection(sid, name, item["key"], item["type"])
+                        log.info("seasonal: created the %s collection in %s", name, lib)
+                    self.state.seasonal_set(item["key"], season, item["label"], sid, "added", cid)
+                    added.append((item, sid, lib))
+                    self.note(f"{item['label']}: added to the {name} collection")
+                except Exception:
+                    log.exception("seasonal: could not add %s to the %s collection", item["label"], name)
+            if not cid or not any(a[1] == sid for a in added):
+                continue
+            refresh = True
+            qualified = self.plex.qualified(cid)
+            for ch in channels:
+                if qualified not in (ch.get("collectionIds") or []):
+                    if not backed_up:
+                        await self.ntv.backup()
+                        backed_up = True
+                    await self.ntv.add_collection_source(ch, qualified, name)
+                    ch.setdefault("collectionIds", []).append(qualified)
+                    log.info("seasonal: %s now also reads the %s collection in %s", ch.get("name"), name,
+                             self.plex.sections[sid]["title"])
+        if refresh:
+            for ch in channels:
+                try:
+                    await self.ntv.refresh_channel(ch["stableId"])
+                except Exception:
+                    log.warning("could not refresh %s", ch.get("name"))
+        if post and added:
+            await self._seasonal_post_added(season, added, channels)
+        return added
+
+    def _seasonal_view(self, kind: str, batch: str, rows: list[tuple[str, str]]) -> discord.ui.View:
+        v = discord.ui.View(timeout=None)
+        opts = [discord.SelectOption(label=label[:100], value=key) for key, label in rows]
+        sel, ok = ("sas", "sao") if kind == "ask" else ("sus", "suo")
+        v.add_item(discord.ui.Select(custom_id=f"ntva:{sel}:{batch}", min_values=1, max_values=len(opts), options=opts,
+                                     placeholder="Pick titles to add" if kind == "ask" else "Pick titles to undo"))
+        if kind == "ask":
+            v.add_item(discord.ui.Button(custom_id=f"ntva:sao:{batch}", label="Add selected", style=discord.ButtonStyle.success))
+            v.add_item(discord.ui.Button(custom_id=f"ntva:san:{batch}", label="None of these",
+                                         style=discord.ButtonStyle.secondary))
+        else:
+            v.add_item(discord.ui.Button(custom_id=f"ntva:{ok}:{batch}", label="Undo selected",
+                                         style=discord.ButtonStyle.danger))
+        return v
+
+    async def _seasonal_post_added(self, season: str, entries: list, channels: list[dict]) -> None:
+        name = seasonal.SEASONS[season]
+        where = ", ".join(c.get("name", "?") for c in channels)
+        ch = await self._channel()
+        for part in seasonal.chunks(entries):
+            lines = "\n".join(f"{item['label']} [{lib}]" for item, _, lib in part)
+            if CFG["dry_run"]:
+                await ch.send(f"**Would add to {where}** (dry run, nothing changed)",
+                              embed=discord.Embed(description=lines))
+                continue
+            batch = uuid.uuid4().hex[:12]
+            self.state.seasonal_batch_add(batch, "undo", season, [item["key"] for item, _, _ in part])
+            await ch.send(f"**Added to {where}** ({name} collection)", embed=discord.Embed(description=lines),
+                          view=self._seasonal_view("undo", batch, [(i["key"], i["label"]) for i, _, _ in part]))
+
+    async def _seasonal_ask(self, season: str, entries: list) -> None:
+        name = seasonal.SEASONS[season]
+        ch = await self._channel()
+        for part in seasonal.chunks(entries):
+            batch = uuid.uuid4().hex[:12]
+            for item, sid, _ in part:
+                self.state.seasonal_set(item["key"], season, item["label"], sid, "asked", batch=batch)
+            self.state.seasonal_batch_add(batch, "ask", season, [item["key"] for item, _, _ in part])
+            lines = "\n".join(f"{item['label']} [{lib}]" for item, _, lib in part)
+            await ch.send(f"**Possible {name} titles**: their summaries mention {name}, but the titles do not. "
+                          f"Pick the ones that belong on the channel.", embed=discord.Embed(description=lines),
+                          view=self._seasonal_view("ask", batch, [(i["key"], i["label"]) for i, _, _ in part]))
+
+    async def _seasonal_answer(self, it: discord.Interaction, action: str, batch: str) -> None:
+        b = self.state.seasonal_batch(batch)
+        if not b or not b["keys"]:
+            await it.response.send_message("This has already been handled.", ephemeral=True)
+            return
+        if action in ("sas", "sus"):
+            self.state.seasonal_batch_update(batch, selected=list(it.data.get("values", [])))
+            await it.response.defer()
+            return
+        season, name = b["season"], seasonal.SEASONS[b["season"]]
+        rows = {k: self.state.seasonal_get(k, season) for k in b["keys"]}
+        label = lambda k: (rows.get(k) or {}).get("label") or k
+        if action == "san":
+            for k, r in rows.items():
+                if r and r["status"] == "asked":
+                    self.state.seasonal_set(k, season, r["label"], r["sid"], "declined")
+            self.state.seasonal_batch_update(batch, keys=[])
+            await it.response.edit_message(content=f"**Possible {name} titles**: none added.", view=None)
+            return
+        chosen = [k for k in b["selected"] if k in b["keys"]]
+        if not chosen:
+            await it.response.send_message("Pick at least one title first.", ephemeral=True)
+            return
+        await it.response.defer()
+        dry = " (dry run, nothing changed)" if CFG["dry_run"] else ""
+        try:
+            async with self.lock:
+                if action == "sao":
+                    chans = (await self.ntv.seasonal_channels([name]))[name]
+                    entries = [({"key": k, "label": rows[k]["label"], "title": "",
+                                 "type": 1 if self.plex.sections.get(rows[k]["sid"], {}).get("type") == "movie" else 4},
+                                rows[k]["sid"], self.plex.sections.get(rows[k]["sid"], {}).get("title", ""))
+                               for k in chosen if rows.get(k)]
+                    done = [e[0]["key"] for e in await self._seasonal_add(season, entries, chans, post=False)]
+                    for k, r in rows.items():
+                        if r and k not in done and r["status"] == "asked":
+                            self.state.seasonal_set(k, season, r["label"], r["sid"], "declined")
+                    self.state.seasonal_batch_update(batch, keys=[])
+                    text = (f"**Possible {name} titles**: added {', '.join(label(k) for k in done) or 'nothing'}{dry}."
+                            + (f" Could not add {', '.join(label(k) for k in chosen if k not in done)}; see the log."
+                               if any(k not in done for k in chosen) else ""))
+                    await it.message.edit(content=text, embed=None, view=None)
+                    return
+                # undo
+                undone = []
+                for k in chosen:
+                    r = rows.get(k)
+                    if not r:
+                        continue
+                    if r["status"] == "added" and r["collection"]:
+                        await self.plex.remove_from_collection(r["collection"], k)
+                    self.state.seasonal_set(k, season, r["label"], r["sid"], "undone", r["collection"])
+                    undone.append(k)
+                    log.info("seasonal: %s taken out of the %s collection (by %s)", r["label"], name, it.user.name)
+                left = [k for k in b["keys"] if k not in undone]
+                self.state.seasonal_batch_update(batch, keys=left, selected=[])
+                note = f"Undone: {', '.join(label(k) for k in undone)}. They will not be added again."
+                if left:
+                    await it.message.edit(content=f"**Added to the {name} collection**\n{note}",
+                                          embed=discord.Embed(description="\n".join(label(k) for k in left)),
+                                          view=self._seasonal_view("undo", batch, [(k, label(k)) for k in left]))
+                else:
+                    await it.message.edit(content=f"**{name} collection**: {note}", embed=None, view=None)
+                if undone:
+                    for ch in (await self.ntv.seasonal_channels([name]))[name]:
+                        await self.ntv.refresh_channel(ch["stableId"])
+        except Exception as exc:
+            log.exception("seasonal answer failed")
+            await it.followup.send(f"Could not do this ({type(exc).__name__}). Press the button again to retry, "
+                                   f"or check the container logs.", ephemeral=True)
+
     # ------------------------------------------------------------------ Discord output
     def _names(self, chans: list[str]) -> str:
         return ", ".join(self.rules.names.get(c, c) for c in chans) or "none"
@@ -616,6 +849,9 @@ class Allocator(discord.Client):
         _, action, key = cid.split(":", 2)
         if action in ("rm", "keep"):
             await self._answer_removal(it, action, key)
+            return
+        if action in ("sas", "sao", "san", "sus", "suo"):
+            await self._seasonal_answer(it, action, key)
             return
         pend = self.state.get_pending(key)
         if not pend:

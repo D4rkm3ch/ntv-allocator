@@ -15,6 +15,9 @@ SPEC: dict[str, tuple] = {
                     "Post questions in Discord but change nothing in NostalgiaTV."),
     "cleanup":     ("Clean-up of deleted titles", bool, True, None, None, ("CLEANUP",),
                     "Ask in Discord to remove titles deleted from Plex from their channels."),
+    "seasonal":    ("Automatic Christmas and Halloween assigning", bool, True, None, None, (),
+                    "New titles with Christmas or Halloween in their title go straight into the seasonal "
+                    "collections; possible matches are asked in Discord. Can also be run by hand below, even when off."),
     "interval":    ("Scan interval (minutes)", int, 15, 1, 60, ("SCAN_INTERVAL_MINUTES",),
                     "How often Plex and NostalgiaTV are checked."),
     "lookback":    ("Look-back for new titles (days)", int, 35, 1, 90, ("LOOKBACK_DAYS",),

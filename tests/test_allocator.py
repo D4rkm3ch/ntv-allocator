@@ -47,6 +47,7 @@ class NTV:
         refused = [{"ratingKey": k, "reason": "not allowed"} for k in keys if k == "MID:5"]
         return {"ratingKeys": [k for k in keys if k != "MID:5"], "refused": refused}
     async def backup(self): self.calls.append(("backup",))
+    async def seasonal_channels(self, names): return {n: [] for n in names}
     async def refresh_channel(self, ch): self.calls.append(("refresh", ch))
 
 class Chan:
@@ -82,6 +83,7 @@ def make(keys):
     a.cfg, a.checks, a.last_scan, a.scan_summary, a.next_run = M.CFG, {}, {}, "", None
     a.recent_events, a.started, a.mass_warned = deque(maxlen=50), time.time(), False
     a.library_cache = (0.0, [])
+    a.seasonal_last, a.seasonal_running = {}, False
     a.auth = M.Auth(a.state); a.wake = asyncio.Event(); a.seeded = []
     a.health = M.Health(threshold=M.CFG["alert_after"], remind_hours=M.CFG["alert_remind"])
     ch = Chan()
@@ -555,6 +557,94 @@ async def run_names():
     check("log: setup code printed in a banner block", any("ABCD-EFGH" in l for l in lines) and lines.count("") >= 4)
     a.rules.names.clear(); a.rules.names.update(before)
 
+async def run_seasonal():
+    from app import seasonal as S
+    c = S.classify
+    check("seasonal: clear titles", c("Merry Christmas Mr. Bean") == {"christmas": "clear"} and c("Xmas Story") == {"christmas": "clear"}
+          and c("Treehouse of Horror XII") == {"halloween": "clear"} and c("HalloVeen") == {"halloween": "clear"}
+          and c("Bugs Bunny's Howl-Oween Special") == {"halloween": "clear"} and c("Christmas Tree of Might") == {"christmas": "clear"})
+    check("seasonal: Die Hard is only possible (summary)", c("Die Hard", "a Christmas party at Nakatomi") == {"christmas": "possible"})
+    check("seasonal: no false matches", c("Santa Clarita Diet", "") == {} and c("Chilly Hockey Star", "skating") == {}
+          and c("Noel", "") == {})
+    a, ch = make([])
+    M.CFG["dry_run"] = False
+    calls = []
+    lib = {"6": [{"key": "m1", "label": "Elf (2003)", "title": "Elf", "summary": "Buddy saves Christmas.", "type": 1},
+                 {"key": "m2", "label": "A Christmas Story (1983)", "title": "A Christmas Story", "summary": "", "type": 1},
+                 {"key": "m3", "label": "Heat (1995)", "title": "Heat", "summary": "", "type": 1},
+                 {"key": "m4", "label": "Halloween (1978)", "title": "Halloween", "summary": "", "type": 1}],
+           "9": [{"key": "e1", "label": "DBZA S00E01 Christmas Tree of Might", "title": "Christmas Tree of Might", "summary": "", "type": 4}],
+           "12": [{"key": "c1", "label": "A Christmas Carol", "title": "A Christmas Carol", "summary": "", "type": 1}]}
+    colls = {"6": {"christmas": "C6", "halloween": "H6"}, "9": {}, "12": {}}
+    members = {"C6": {"m9"}, "H6": {"m4"}}
+    a.plex.sections = {"6": {"title": "Movies", "type": "movie"}, "9": {"title": "YouTube", "type": "show"},
+                       "12": {"title": "Classicals", "type": "movie"}, "11": {"title": "Music", "type": "artist"}}
+    async def media_items(sid, days=None): calls.append(("list", sid, days)); return lib[sid]
+    async def collections(sid): return dict(colls[sid])
+    async def collection_keys(cid): return set(members.get(cid, set()))
+    async def add_to_collection(cid, key): calls.append(("add", cid, key)); members.setdefault(cid, set()).add(key)
+    async def create_collection(sid, name, key, t):
+        calls.append(("create", sid, name, key, t)); colls[sid][name.lower()] = "C" + sid + "new"; members["C" + sid + "new"] = {key}
+        return "C" + sid + "new"
+    async def remove_from_collection(cid, key): calls.append(("remove", cid, key)); members[cid].discard(key)
+    for f in (media_items, collections, collection_keys, add_to_collection, create_collection, remove_from_collection):
+        setattr(a.plex, f.__name__, f)
+    ww = {"stableId": "custom_ww", "name": "Winter Wonderland", "collectionNames": ["Christmas"], "collectionIds": ["MID:C6"]}
+    hh = {"stableId": "custom_hh", "name": "Haunted Hollow", "collectionNames": ["Halloween"], "collectionIds": ["MID:H6"]}
+    async def seasonal_channels(names): return {n: [x for x in (ww, hh) if n in x["collectionNames"]] for n in names}
+    async def add_collection_source(chan, cid, name): calls.append(("source", chan["stableId"], cid))
+    a.ntv.seasonal_channels, a.ntv.add_collection_source = seasonal_channels, add_collection_source
+    text = await a.seasonal_run("recent", "automatic")
+    check("seasonal: recent scope uses the look-back period", ("list", "6", M.CFG["lookback"]) in calls)
+    check("seasonal: ignored libraries not read", not any(x[:2] == ("list", "12") for x in calls))
+    check("seasonal: clear title added to existing collection", ("add", "C6", "m2") in calls)
+    check("seasonal: collection created in a library without one", ("create", "9", "Christmas", "e1", 4) in calls)
+    check("seasonal: new collection added to the channel", ("source", "custom_ww", "MID:C9new") in calls)
+    check("seasonal: summary-only match not added", not any(x[0] == "add" and x[2] == "m1" for x in calls))
+    check("seasonal: item already in collection recorded, not re-added",
+          a.state.seasonal_get("m4", "halloween")["status"] == "present" and not any(x[2:] == ("m4",) for x in calls if x[0] == "add"))
+    check("seasonal: unrelated title untouched", a.state.seasonal_get("m3", "christmas") is None)
+    check("seasonal: summary written", "2 added to Christmas" in text and "1 possible Christmas" in text)
+    check("seasonal: channels refreshed", ("refresh", "custom_ww") in a.ntv.calls)
+    added_msg = next(m for m in ch.sent if (m["content"] or "").startswith("**Added to Winter Wonderland"))
+    ask_msg = next(m for m in ch.sent if (m["content"] or "").startswith("**Possible Christmas"))
+    undo_batch = added_msg["view"].children[0].custom_id.split(":")[2]
+    ask_batch = ask_msg["view"].children[0].custom_id.split(":")[2]
+    n = len(calls)
+    await a.seasonal_run("recent", "automatic")
+    check("seasonal: second run does nothing new", len([x for x in calls[n:] if x[0] != "list"]) == 0)
+    # answer the question: add Elf
+    it = Inter(f"ntva:sas:{ask_batch}", ["m1"]); await a.on_interaction(it)
+    it = Inter(f"ntva:sao:{ask_batch}"); await a.on_interaction(it)
+    check("seasonal: approved possible title added", ("add", "C6", "m1") in calls
+          and a.state.seasonal_get("m1", "christmas")["status"] == "added")
+    it = Inter(f"ntva:sao:{ask_batch}"); await a.on_interaction(it)
+    check("seasonal: answered question cannot be used twice", any("already been handled" in str(x) for x in it.log))
+    # undo the DBZA episode
+    it = Inter(f"ntva:sus:{undo_batch}", ["e1"]); await a.on_interaction(it)
+    it = Inter(f"ntva:suo:{undo_batch}"); await a.on_interaction(it)
+    check("seasonal: undo removes from collection", ("remove", "C9new", "e1") in calls
+          and a.state.seasonal_get("e1", "christmas")["status"] == "undone")
+    await a.seasonal_run("all", "run by hand")
+    check("seasonal: whole-library run reads everything", ("list", "6", None) in calls)
+    check("seasonal: undone title not added again", calls.count(("create", "9", "Christmas", "e1", 4)) == 1
+          and ("add", "C9new", "e1") not in calls)
+    # dry run
+    M.CFG["dry_run"] = True
+    lib["6"].append({"key": "m5", "label": "Jingle All the Christmas (2020)", "title": "Jingle All the Christmas", "summary": "", "type": 1})
+    await a.seasonal_run("recent", "automatic")
+    check("seasonal: dry run changes nothing in Plex", ("add", "C6", "m5") not in calls
+          and a.state.seasonal_get("m5", "christmas")["status"] == "dry run")
+    check("seasonal: dry-run records cleared when dry run is turned off", a.state.clear_dry_run() >= 1
+          and a.state.seasonal_get("m5", "christmas") is None)
+    M.CFG["dry_run"] = False
+    async def broken(names): raise RuntimeError("ntv down")
+    a.ntv.seasonal_channels = broken
+    t = await a.seasonal_run("recent", "automatic")
+    check("seasonal: a failure is reported, not raised", t.startswith("Failed") and a.seasonal_last["ok"] is False)
+    from app import settings as SM
+    check("seasonal: switch defined and on by default", SM.SPEC["seasonal"][1] is bool and SM.SPEC["seasonal"][2] is True)
+
 def run_profile():
     from app.clients import choose_profile
     check("profile: the only real profile is chosen (legacy blank entry ignored)",
@@ -584,6 +674,7 @@ asyncio.run(run_ask_all())
 asyncio.run(run_edit())
 run_settings_auth()
 asyncio.run(run_names())
+asyncio.run(run_seasonal())
 asyncio.run(run_apply_settings())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

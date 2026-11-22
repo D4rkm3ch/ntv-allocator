@@ -22,6 +22,12 @@ class State:
         self.db.execute("""CREATE TABLE IF NOT EXISTS labels (key TEXT PRIMARY KEY, label TEXT)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS removals (
             key TEXT PRIMARY KEY, label TEXT, pairs TEXT, status TEXT, message_id TEXT, at REAL)""")
+        # seasonal: one row per (title, season) once decided: added, present, asked, declined, undone, dry run
+        self.db.execute("""CREATE TABLE IF NOT EXISTS seasonal (
+            key TEXT, season TEXT, label TEXT, sid TEXT, status TEXT, collection TEXT, batch TEXT, at REAL,
+            PRIMARY KEY (key, season))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS seasonal_batches (
+            batch TEXT PRIMARY KEY, kind TEXT, season TEXT, keys TEXT, selected TEXT)""")
         self.db.commit()
 
     # pending ---------------------------------------------------------------
@@ -66,8 +72,10 @@ class State:
 
     def clear_dry_run(self) -> int:
         cur = self.db.execute("DELETE FROM done WHERE how LIKE 'dry run%'")
+        n = cur.rowcount
+        n += self.db.execute("DELETE FROM seasonal WHERE status='dry run'").rowcount
         self.db.commit()
-        return cur.rowcount
+        return n
 
     def forget_resolved(self, key: str, skip_older_than_days: int) -> None:
         """Let a title the server reports unassigned be re-evaluated.
@@ -210,4 +218,37 @@ class State:
 
     def clear_sessions(self) -> None:
         self.db.execute("DELETE FROM sessions")
+        self.db.commit()
+
+    # seasonal ------------------------------------------------------------------
+    def seasonal_known(self, season: str) -> set[str]:
+        return {r[0] for r in self.db.execute("SELECT key FROM seasonal WHERE season=?", (season,))}
+
+    def seasonal_set(self, key: str, season: str, label: str, sid: str, status: str,
+                     collection: str = "", batch: str = "") -> None:
+        self.db.execute("INSERT OR REPLACE INTO seasonal VALUES (?,?,?,?,?,?,?,?)",
+                        (key, season, label, sid, status, collection, batch, time.time()))
+        self.db.commit()
+
+    def seasonal_get(self, key: str, season: str) -> dict | None:
+        r = self.db.execute("SELECT key,season,label,sid,status,collection,batch FROM seasonal WHERE key=? AND season=?",
+                            (key, season)).fetchone()
+        return dict(zip(("key", "season", "label", "sid", "status", "collection", "batch"), r)) if r else None
+
+    def seasonal_batch_add(self, batch: str, kind: str, season: str, keys: list[str]) -> None:
+        self.db.execute("INSERT OR REPLACE INTO seasonal_batches VALUES (?,?,?,?,?)",
+                        (batch, kind, season, json.dumps(keys), "[]"))
+        self.db.commit()
+
+    def seasonal_batch(self, batch: str) -> dict | None:
+        r = self.db.execute("SELECT batch,kind,season,keys,selected FROM seasonal_batches WHERE batch=?", (batch,)).fetchone()
+        if not r:
+            return None
+        return {"batch": r[0], "kind": r[1], "season": r[2], "keys": json.loads(r[3]), "selected": json.loads(r[4])}
+
+    def seasonal_batch_update(self, batch: str, keys: list[str] | None = None, selected: list[str] | None = None) -> None:
+        if keys is not None:
+            self.db.execute("UPDATE seasonal_batches SET keys=? WHERE batch=?", (json.dumps(keys), batch))
+        if selected is not None:
+            self.db.execute("UPDATE seasonal_batches SET selected=? WHERE batch=?", (json.dumps(selected), batch))
         self.db.commit()

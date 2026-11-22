@@ -9,6 +9,7 @@ Served with aiohttp, which discord.py already depends on.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import json
@@ -195,7 +196,7 @@ def snapshot(a) -> dict:
             "placements": [{**p, "names": [a.rules.names.get(c, c) for c in p["channels"]]}
                            for p in a.state.recent_placements()],
             "profile": a.ntv.profile_id or "-", "settings": {k: a.cfg[k] for k in settings_mod.SPEC},
-            "started": a.started}
+            "started": a.started, "seasonal": a.seasonal_last, "seasonal_running": a.seasonal_running}
 
 
 # ------------------------------------------------------------------ pages
@@ -228,6 +229,14 @@ def render(s: dict) -> str:
         ctl = (f'<input type=checkbox name="{key}"{" checked" if v else ""}>' if kind is bool else
                f'<input type=number name="{key}" value="{v}" min="{lo}" max="{hi}" step=1>')
         sets += f'<div class=set><label for="{key}">{e(lab)}</label>{ctl}<div class=help>{e(helptext)}</div></div>'
+    sl = s.get("seasonal") or {}
+    if s.get("seasonal_running"):
+        seas = '<span class=dim>A check is running now.</span>'
+    elif sl:
+        seas = (f'Last check: {e(_t(sl["at"]))} <span class=dim>({"whole library" if sl["scope"] == "all" else "recent titles"}, '
+                f'{e(sl["trigger"])})</span><div class=dim>{e(sl["summary"])}</div>')
+    else:
+        seas = '<span class=dim>No check since the allocator started.</span>'
     body = f"""{dry}
 <div class=card><div class=banner><span class="dot {s['overall']}"></span>{e(label)}</div></div>
 <div class=card><h2>Connections</h2><table><tr><th>Service</th><th>Status</th><th>Last check</th><th>Detail</th></tr>{rows}</table></div>
@@ -238,6 +247,12 @@ def render(s: dict) -> str:
 <div><div class=dim>Open removal questions</div><div class=num>{s["open_removals"]}</div></div>
 </div></div>
 <div class=card><h2>Recent placements</h2>{places}</div>
+<div class=card><h2>Christmas and Halloween</h2>
+<p class=dim style="margin:0 0 10px">Titles with Christmas or Halloween in their title go into the seasonal collections; possible matches are asked in Discord.
+Runs on every scan when switched on under Settings, or by hand here.</p>
+<div>{seas}</div>
+<div class=row><button class=b type=button data-scope=recent>Check recent titles</button>
+<button class=b type=button data-scope=all>Check the whole library</button><span class=msg id=seasmsg></span></div></div>
 <div class=card><h2>Settings</h2><form id=settings>{sets}
 <div class=row><button class="b primary" type=submit>Save settings</button><span class=msg id=setmsg></span></div></form>
 <p class=dim style="font-size:13px;margin:12px 0 0">NostalgiaTV profile: {e(s["profile"])}. Dashboards can read health from <code>/api/status</code>.</p></div>
@@ -267,6 +282,12 @@ document.getElementById("pw").addEventListener("submit", async function(ev){
   var d = await post("/api/password", {current: f.current.value, password: f.password.value, confirm: f.confirm.value});
   var el = document.getElementById("pwerr"); el.style.color = d.ok ? "var(--ok)" : ""; el.textContent = d.message || "";
   if (d.ok) f.reset();
+});
+document.querySelectorAll("button[data-scope]").forEach(function(b){
+  b.onclick = async function(){
+    var m = document.getElementById("seasmsg"); m.textContent = "Starting...";
+    var d = await post("/api/seasonal/run", {scope: b.dataset.scope}); m.textContent = d.message || "";
+  };
 });
 document.getElementById("logout").onclick = async function(){ await post("/api/logout"); location.href = "/"; };
 </script>""" + EDITOR_JS
@@ -489,12 +510,24 @@ async def start(a, port: int) -> None:
         return web.json_response({"items": [{**i, "names": [names.get(c, c) for c in i["channels"]]} for i in items],
                                   "libraries": sorted({i["library"] for i in items}), "options": opts})
 
+    async def seasonal_api(req):
+        if not logged_in(req):
+            return deny()
+        data = await read_json(req)
+        scope = "all" if data.get("scope") == "all" else "recent"
+        if a.seasonal_running:
+            return web.json_response({"ok": False, "message": "A check is already running."})
+        asyncio.get_running_loop().create_task(a.seasonal_run(scope, "run by hand"))
+        return web.json_response({"ok": True, "message": "Started. Additions and questions are posted in Discord; "
+                                                          "this page shows the result when it finishes."})
+
     app = web.Application()
     app.add_routes([
         web.get("/api/status", api_status),
         web.post("/api/setup", api_setup), web.post("/api/login", api_login), web.post("/api/logout", api_logout),
         web.post("/api/password", api_password), web.post("/api/settings", api_settings),
         web.get("/api/placements/{key}", placement_get), web.post("/api/placements/{key}", placement_post),
+        web.post("/api/seasonal/run", seasonal_api),
         web.get("/api/library", library_api), web.get("/library", library_page),
         # any other path shows the main page, so a stale or mistyped address still works
         web.get("/", page), web.get("/{tail:.*}", page)])

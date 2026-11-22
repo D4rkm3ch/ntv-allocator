@@ -106,6 +106,64 @@ class Plex:
         r.raise_for_status()
         return True
 
+    # ------------------------------------------------------------------ seasonal collections
+    async def media_items(self, sid: str, days: int | None = None) -> list[dict]:
+        """Movies (movie library) or episodes (show library) of one library, optionally only those
+        added in the last `days` days. Each: key, label, title, summary, type."""
+        sec = self.sections[sid]
+        t = 1 if sec["type"] == "movie" else 4
+        q = f"type={t}" + (f"&addedAt>>=-{days}d" if days else "")
+        r = await self.http.get(f"{self.url}/library/sections/{sid}/all?{q}", headers=self.h, timeout=120)
+        r.raise_for_status()
+        out = []
+        for m in r.json()["MediaContainer"].get("Metadata", []):
+            if t == 1:
+                label = f"{m.get('title', '')} ({m['year']})" if m.get("year") else m.get("title", "")
+            else:
+                label = (f"{m.get('grandparentTitle', '')} S{int(m.get('parentIndex') or 0):02}"
+                         f"E{int(m.get('index') or 0):02} {m.get('title', '')}")
+            out.append({"key": str(m["ratingKey"]), "label": label, "title": m.get("title", ""),
+                        "summary": m.get("summary") or "", "type": t})
+        return out
+
+    async def collections(self, sid: str) -> dict[str, str]:
+        """Collection title (lower case) -> rating key, for one library."""
+        r = await self.http.get(f"{self.url}/library/sections/{sid}/collections", headers=self.h)
+        r.raise_for_status()
+        return {m.get("title", "").strip().lower(): str(m["ratingKey"])
+                for m in r.json()["MediaContainer"].get("Metadata", [])}
+
+    async def collection_keys(self, cid: str) -> set[str]:
+        r = await self.http.get(f"{self.url}/library/collections/{cid}/children", headers=self.h, timeout=120)
+        r.raise_for_status()
+        return {str(m["ratingKey"]) for m in r.json()["MediaContainer"].get("Metadata", [])}
+
+    async def add_to_collection(self, cid: str, key: str) -> None:
+        uri = f"server://{self.machine_id}/com.plexapp.plugins.library/library/metadata/{key}"
+        r = await self.http.put(f"{self.url}/library/collections/{cid}/items", headers=self.h, params={"uri": uri})
+        r.raise_for_status()
+
+    async def create_collection(self, sid: str, name: str, key: str, item_type: int) -> str:
+        """Create collection `name` in a library by tagging its first item (keeping the item's other
+        collections). Returns the new collection's rating key."""
+        r = await self.http.get(f"{self.url}/library/metadata/{key}", headers=self.h)
+        r.raise_for_status()
+        tags = [c["tag"] for c in r.json()["MediaContainer"]["Metadata"][0].get("Collection", [])]
+        if name not in tags:
+            tags.append(name)
+        params = {"type": str(item_type), "id": key, "collection.locked": "1"}
+        params.update({f"collection[{i}].tag.tag": t for i, t in enumerate(tags)})
+        r = await self.http.put(f"{self.url}/library/sections/{sid}/all", headers=self.h, params=params)
+        r.raise_for_status()
+        cid = (await self.collections(sid)).get(name.lower())
+        if not cid:
+            raise RuntimeError(f"Plex did not create the {name} collection")
+        return cid
+
+    async def remove_from_collection(self, cid: str, key: str) -> None:
+        r = await self.http.delete(f"{self.url}/library/collections/{cid}/items/{key}", headers=self.h)
+        r.raise_for_status()
+
 
 def choose_profile(data) -> str:
     """Pick the profile to work on from /api/profiles/: the only real profile, else the one marked
@@ -253,6 +311,31 @@ class NostalgiaTV:
                     walk(v)
         walk(data)
         return names
+
+    async def seasonal_channels(self, names: list[str]) -> dict[str, list[dict]]:
+        """Collection name -> custom channels (full saved objects) that draw from a collection of that name."""
+        cfg = await self._req("GET", "/api/config/export")
+        out: dict[str, list[dict]] = {n: [] for n in names}
+        for c in cfg.get("customChannels") or []:
+            have = {str(x).strip().lower() for x in c.get("collectionNames") or []}
+            for n in names:
+                if n.lower() in have and c.get("stableId"):
+                    out[n].append(c)
+        return out
+
+    async def add_collection_source(self, channel: dict, collection_id: str, name: str) -> None:
+        """Add a Plex collection (machine:key) to a custom channel's sources, keeping everything else."""
+        cfg = await self._req("GET", "/api/config/export")
+        live = next((c for c in cfg.get("customChannels") or [] if c.get("stableId") == channel["stableId"]), None)
+        if live is None:
+            raise RuntimeError(f"channel {channel['stableId']} no longer exists")
+        ids = list(live.get("collectionIds") or [])
+        if collection_id in ids:
+            return
+        body = dict(live)
+        body["collectionIds"] = ids + [collection_id]
+        body["collectionNames"] = list(live.get("collectionNames") or []) + [name]
+        await self._req("POST", "/api/channels/custom", json=body)
 
     async def lists_and_exclusions(self) -> tuple[dict[str, list[str]], dict[str, list[str]], set[str]]:
         """(manual lists, excluded keys, custom channel ids) from the live config export."""
