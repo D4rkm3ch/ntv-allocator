@@ -40,8 +40,6 @@ CFG = {
     **{k: spec[2] for k, spec in settings_mod.SPEC.items()},
     "rules": env("RULES_PATH", "/config/rules.yaml"), "state": env("STATE_PATH", "/data/state.db"),
     "status_port": int(env("STATUS_PORT", "19860") or 0),
-    # legacy automatic placement; every new show or movie is asked about in Discord
-    "auto_place": False,
 }
 
 
@@ -78,6 +76,8 @@ class Allocator(discord.Client):
         self.library_cache: tuple[float, list[dict]] = (0.0, [])
         self.seasonal_last: dict = {}
         self.seasonal_running = False
+        self.place_last: dict = {}
+        self.place_running = False
 
     async def refresh_names(self) -> None:
         """Show channels by the names NostalgiaTV uses now (rules.yaml only decides which channels are
@@ -194,8 +194,7 @@ class Allocator(discord.Client):
             # a one-off error is retried quietly; two in a row is reported
             self.health.fail("Allocator scans", describe(exc) + " (details in the container log)", threshold=2)
             self.last_scan = {"at": time.time(), "ok": False, "reason": describe(exc)}
-        if CFG["seasonal"]:
-            await self.seasonal_run("recent", "automatic")
+        await self.seasonal_run("recent", "automatic")       # holidays are always automatic
         return True
 
     async def _scan_loop(self) -> None:
@@ -213,7 +212,7 @@ class Allocator(discord.Client):
             self.wake.clear()
 
     # ------------------------------------------------------------------ scanning
-    async def scan(self) -> None:
+    async def scan(self, force_auto: bool = False) -> None:
         async with self.lock:
             unassigned = set(await self.ntv.unassigned_keys())
             recent = set(await self.plex.recently_added(CFG["lookback"], self.rules.ignore_libraries))
@@ -231,13 +230,13 @@ class Allocator(discord.Client):
             auto: dict[str, list[str]] = {}
             for key in candidates:
                 try:
-                    await self._evaluate(key, config_homes, manual, hidden, auto)
+                    await self._evaluate(key, config_homes, manual, hidden, auto, force_auto)
                 except Exception:
                     # one bad title must not stop the rest of the scan; it is retried next scan
                     log.exception("could not evaluate rating key %s", key)
 
             if auto:
-                await self.apply(auto, how="auto")
+                await self.apply(auto, how="auto (run by hand)" if force_auto else "auto")
             await self._post_unsent()
 
     async def cleanup(self) -> list[str]:
@@ -479,12 +478,31 @@ class Allocator(discord.Client):
         stored = self.plex.qualified(key)
         return [c for c in self.rules.names if stored in manual.get(c, [])]
 
-    async def _evaluate(self, key: str, config_homes: dict, manual: set, hidden: set, auto: dict) -> None:
+    async def _evaluate(self, key: str, config_homes: dict, manual: set, hidden: set, auto: dict,
+                        force_auto: bool = False) -> None:
         t = await self.plex.title(key)
         if t is None or t.library in self.rules.ignore_libraries:
             self.state.mark_skipped(key, t.label if t else key)   # not ours; do not look it up again
             return
         self.titles[key] = t
+        kind, chans, suggested = await self._decide(t, config_homes, manual, hidden)
+        if kind == "home":
+            log.info("%s: already on %s, nothing to do", t.label, chans)
+            self.state.mark_done(key, t.label, chans, "already placed")
+            return
+        if kind == "auto" and (CFG["auto_place"] or force_auto):
+            log.info("%s: automatic -> %s", t.label, chans)
+            auto[key] = chans
+            return
+        log.info("%s: ask in Discord -> %s", t.label, suggested or "no suggestion")
+        self.state.add_pending(key, t.label, suggested)
+
+    async def _decide(self, t: Title, config_homes: dict, manual: set, hidden: set) -> tuple[str, list[str], list[str]]:
+        """(kind, channels, suggestions): kind "home" with the channels it is already on, "auto" with the
+        confident channels, or "ask". Suggestions are the question's pre-selected channels.
+        Confident means the rules are sure AND NostalgiaTV's own match, when it has one, includes at
+        least one of the rule's channels."""
+        key = t.key
         homes = sorted(config_homes.get(key, set()))
         hints: list[str] = []
         if not homes:
@@ -500,22 +518,16 @@ class Allocator(discord.Client):
                 log.info("%s: lookup also reported %s (hidden, manual-list or non-home channels, ignored)",
                          t.label, ignored)
         if homes:
-            log.info("%s: already on %s, nothing to do", t.label, homes)
-            self.state.mark_done(key, t.label, homes, "already placed")
-            return
+            return "home", homes, homes
         p = self.rules.place(t)
-        if p.auto and p.channels and CFG["auto_place"]:
-            log.info("%s: automatic -> %s", t.label, p.channels)
-            auto[key] = p.channels
-            return
         # question: channels both agree on first; a confident rule's picks come next, otherwise
         # NostalgiaTV's hints, then the remaining picks
         both = [c for c in p.channels if c in hints]
         order = both + (p.channels + hints if p.auto else hints + p.channels)
         suggested = list(dict.fromkeys(order))[: self.rules.max]
-        log.info("%s: ask in Discord -> %s (rules %s, NostalgiaTV hints %s)", t.label,
-                 suggested or "no suggestion", p.channels, hints)
-        self.state.add_pending(key, t.label, suggested)
+        if p.auto and p.channels and (not hints or set(hints) & set(p.channels)):
+            return "auto", p.channels, suggested
+        return "ask", suggested, suggested
 
     async def _post_unsent(self) -> None:
         for pend in self.state.unsent():
@@ -558,11 +570,129 @@ class Allocator(discord.Client):
             # and cleared on the first start without DRY_RUN so they are applied for real
             self.state.mark_done(key, label, chans, f"dry run ({how})" if CFG["dry_run"] else how)
             self.note(f"{label}: placed on {self._names(chans)} ({'dry run, ' if CFG['dry_run'] else ''}{how})")
-        if how == "auto":
+        if how.startswith("auto"):
             await self._post_summary({k: c for k, c in accepted.items() if c}, refusals)
         elif refusals:
             await (await self._channel()).send("**NostalgiaTV refused**\n" + "\n".join(refusals))
         return accepted
+
+    # ------------------------------------------------------------------ placement run by hand
+    async def place_run(self, trigger: str = "run by hand") -> str:
+        """Place every title the rules are confident about now, whatever the automatic placement
+        setting: open Discord questions first, then new titles. Never raises."""
+        if self.place_running:
+            return "A placement run is already running."
+        self.place_running = True
+        try:
+            text, ok = await self._place_now(), True
+        except Exception as exc:
+            log.exception("placement run failed")
+            text, ok = f"Failed: {describe(exc)} (details in the container log)", False
+        finally:
+            self.place_running = False
+        log.info("placement run (%s): %s", trigger, text)
+        self.place_last = {"at": time.time(), "trigger": trigger, "summary": text, "ok": ok}
+        return text
+
+    async def _place_now(self) -> str:
+        if not await self._probe():
+            return "Plex or NostalgiaTV is not reachable; nothing done"
+        placed = 0
+        async with self.lock:
+            pend = [p for p in self.state.all_pending()]
+            if pend:
+                config_homes, manual, hidden = await self.ntv.config_homes(self.rules.not_a_home)
+                auto, homes = {}, {}
+                for p in pend:
+                    t = self.titles.get(p["key"]) or await self.plex.title(p["key"])
+                    if t is None:
+                        continue
+                    self.titles[t.key] = t
+                    try:
+                        kind, chans, _ = await self._decide(t, config_homes, manual, hidden)
+                    except Exception:
+                        log.exception("could not evaluate %s", t.label)
+                        continue
+                    if kind == "auto":
+                        auto[t.key] = chans
+                    elif kind == "home":
+                        homes[t.key] = chans
+                mids = {p["key"]: p["message_id"] for p in pend}
+                for k, chans in homes.items():
+                    self.state.mark_done(k, self.titles[k].label, chans, "already placed")
+                    await self._close_question(mids.get(k), f"**{self.titles[k].label}** is already on "
+                                                            f"{self._names(chans)}; nothing to do.")
+                if auto:
+                    accepted = await self.apply(auto, how="auto (run by hand)")
+                    dry = " (dry run, nothing changed)" if CFG["dry_run"] else ""
+                    for k in auto:
+                        done = accepted.get(k) or []
+                        placed += bool(done)
+                        await self._close_question(mids.get(k), (
+                            f"**{self.titles[k].label}**: placed automatically on {self._names(done)}{dry}." if done else
+                            f"**{self.titles[k].label}**: NostalgiaTV refused every channel; it has no channel yet."))
+        start = time.time()
+        await self.scan(force_auto=True)
+        placed += self.state.count_placed_since("%auto (run by hand)%", start)
+        waiting = self.state.count_pending()
+        return (f"{placed} placed automatically" + (" (dry run)" if CFG["dry_run"] and placed else "")
+                + f"; {waiting} still need an answer in Discord")
+
+    async def _close_question(self, message_id: str | None, text: str) -> None:
+        if not message_id:
+            return
+        try:
+            msg = await (await self._channel()).fetch_message(int(message_id))
+            await msg.edit(content=text, embed=None, view=None)
+        except Exception:
+            log.warning("could not update the Discord question (message %s)", message_id)
+
+    async def _place_undo(self, it: discord.Interaction, action: str, batch: str) -> None:
+        """Undo automatic placements from the summary message: take the title off its channels and
+        ask about it in Discord instead."""
+        b = self.state.seasonal_batch(batch)
+        if not b or not b["keys"]:
+            await it.response.send_message("This has already been handled.", ephemeral=True)
+            return
+        if action == "pus":
+            self.state.seasonal_batch_update(batch, selected=list(it.data.get("values", [])))
+            await it.response.defer()
+            return
+        chosen = [k for k in b["selected"] if k in b["keys"]]
+        if not chosen:
+            await it.response.send_message("Pick at least one title first.", ephemeral=True)
+            return
+        await it.response.defer()
+        undone, problems = [], []
+        for k in chosen:
+            row = self.state.get_done(k)
+            label = row["label"] if row else k
+            before = row["channels"] if row else []
+            try:
+                res = await self.edit_placement(k, [])
+            except Exception as exc:
+                log.exception("undo of %s failed", label)
+                problems.append(f"{label} ({type(exc).__name__})")
+                continue
+            if not res.get("ok"):
+                problems.append(f"{label}: {res.get('message')}")
+                continue
+            self.state.drop_done(k)
+            self.state.add_pending(k, label, before)
+            undone.append(label)
+            log.info("automatic placement of %s undone by %s; asking instead", label, it.user.name)
+        left = [k for k in b["keys"] if k not in chosen]
+        self.state.seasonal_batch_update(batch, keys=left, selected=[])
+        note = (f"Undone: {', '.join(undone)}; asked again below." if undone else "") + \
+               (f" Could not undo: {'; '.join(problems)}." if problems else "")
+        labels = {k: (self.state.get_done(k) or {}).get("label") or k for k in left}
+        if left:
+            await it.message.edit(content=f"**Placed automatically**\n{note}",
+                                  embed=discord.Embed(description="\n".join(labels.values())),
+                                  view=self._undo_view("p", batch, list(labels.items())))
+        else:
+            await it.message.edit(content=f"**Placed automatically**: {note}", embed=None, view=None)
+        await self._post_unsent()
 
     # ------------------------------------------------------------------ Christmas and Halloween
     async def seasonal_run(self, scope: str = "recent", trigger: str = "automatic") -> str:
@@ -581,7 +711,8 @@ class Allocator(discord.Client):
             text, ok = f"Failed: {describe(exc)} (details in the container log)", False
         finally:
             self.seasonal_running = False
-        if trigger != "automatic" or text != "nothing new":
+        # an automatic check logs only news (and a repeated problem only once)
+        if trigger != "automatic" or (text != "nothing new" and text != self.seasonal_last.get("summary")):
             log.info("seasonal check (%s, %s): %s", "whole library" if scope == "all" else "recent", trigger, text)
         self.seasonal_last = {"at": time.time(), "scope": scope, "trigger": trigger, "summary": text, "ok": ok}
         return text
@@ -678,19 +809,24 @@ class Allocator(discord.Client):
             await self._seasonal_post_added(season, added, channels)
         return added
 
-    def _seasonal_view(self, kind: str, batch: str, rows: list[tuple[str, str]]) -> discord.ui.View:
+    def _undo_view(self, prefix: str, batch: str, rows: list[tuple[str, str]]) -> discord.ui.View:
+        """A picker plus "Undo selected" (custom ids ntva:<prefix>us / <prefix>uo)."""
         v = discord.ui.View(timeout=None)
-        opts = [discord.SelectOption(label=label[:100], value=key) for key, label in rows]
-        sel, ok = ("sas", "sao") if kind == "ask" else ("sus", "suo")
-        v.add_item(discord.ui.Select(custom_id=f"ntva:{sel}:{batch}", min_values=1, max_values=len(opts), options=opts,
-                                     placeholder="Pick titles to add" if kind == "ask" else "Pick titles to undo"))
-        if kind == "ask":
-            v.add_item(discord.ui.Button(custom_id=f"ntva:sao:{batch}", label="Add selected", style=discord.ButtonStyle.success))
-            v.add_item(discord.ui.Button(custom_id=f"ntva:san:{batch}", label="None of these",
-                                         style=discord.ButtonStyle.secondary))
-        else:
-            v.add_item(discord.ui.Button(custom_id=f"ntva:{ok}:{batch}", label="Undo selected",
-                                         style=discord.ButtonStyle.danger))
+        v.add_item(discord.ui.Select(custom_id=f"ntva:{prefix}us:{batch}", min_values=1, max_values=len(rows),
+                                     placeholder="Pick titles to undo",
+                                     options=[discord.SelectOption(label=l[:100], value=k) for k, l in rows]))
+        v.add_item(discord.ui.Button(custom_id=f"ntva:{prefix}uo:{batch}", label="Undo selected",
+                                     style=discord.ButtonStyle.danger))
+        return v
+
+    def _seasonal_view(self, kind: str, batch: str, rows: list[tuple[str, str]]) -> discord.ui.View:
+        """Question about possible seasonal titles: picker, Add selected, None of these."""
+        v = discord.ui.View(timeout=None)
+        v.add_item(discord.ui.Select(custom_id=f"ntva:sas:{batch}", min_values=1, max_values=len(rows),
+                                     placeholder="Pick titles to add",
+                                     options=[discord.SelectOption(label=l[:100], value=k) for k, l in rows]))
+        v.add_item(discord.ui.Button(custom_id=f"ntva:sao:{batch}", label="Add selected", style=discord.ButtonStyle.success))
+        v.add_item(discord.ui.Button(custom_id=f"ntva:san:{batch}", label="None of these", style=discord.ButtonStyle.secondary))
         return v
 
     async def _seasonal_post_added(self, season: str, entries: list, channels: list[dict]) -> None:
@@ -706,20 +842,21 @@ class Allocator(discord.Client):
             batch = uuid.uuid4().hex[:12]
             self.state.seasonal_batch_add(batch, "undo", season, [item["key"] for item, _, _ in part])
             await ch.send(f"**Added to {where}** ({name} collection)", embed=discord.Embed(description=lines),
-                          view=self._seasonal_view("undo", batch, [(i["key"], i["label"]) for i, _, _ in part]))
+                          view=self._undo_view("s", batch, [(i["key"], i["label"]) for i, _, _ in part]))
 
     async def _seasonal_ask(self, season: str, entries: list) -> None:
         name = seasonal.SEASONS[season]
         ch = await self._channel()
         for part in seasonal.chunks(entries):
             batch = uuid.uuid4().hex[:12]
-            for item, sid, _ in part:
-                self.state.seasonal_set(item["key"], season, item["label"], sid, "asked", batch=batch)
-            self.state.seasonal_batch_add(batch, "ask", season, [item["key"] for item, _, _ in part])
             lines = "\n".join(f"{item['label']} [{lib}]" for item, _, lib in part)
+            # recorded only once posted, so a failed post is asked again on the next check
             await ch.send(f"**Possible {name} titles**: their summaries mention {name}, but the titles do not. "
                           f"Pick the ones that belong on the channel.", embed=discord.Embed(description=lines),
                           view=self._seasonal_view("ask", batch, [(i["key"], i["label"]) for i, _, _ in part]))
+            self.state.seasonal_batch_add(batch, "ask", season, [item["key"] for item, _, _ in part])
+            for item, sid, _ in part:
+                self.state.seasonal_set(item["key"], season, item["label"], sid, "asked", batch=batch)
 
     async def _seasonal_answer(self, it: discord.Interaction, action: str, batch: str) -> None:
         b = self.state.seasonal_batch(batch)
@@ -781,7 +918,7 @@ class Allocator(discord.Client):
                 if left:
                     await it.message.edit(content=f"**Added to the {name} collection**\n{note}",
                                           embed=discord.Embed(description="\n".join(label(k) for k in left)),
-                                          view=self._seasonal_view("undo", batch, [(k, label(k)) for k in left]))
+                                          view=self._undo_view("s", batch, [(k, label(k)) for k in left]))
                 else:
                     await it.message.edit(content=f"**{name} collection**: {note}", embed=None, view=None)
                 if undone:
@@ -797,11 +934,17 @@ class Allocator(discord.Client):
         return ", ".join(self.rules.names.get(c, c) for c in chans) or "none"
 
     async def _post_summary(self, placed: dict[str, list[str]], refusals: list[str]) -> None:
-        lines = [f"{self.titles[k].label} [{self.titles[k].library}]: {self._names(c)}" for k, c in placed.items()]
         head = "Placed automatically" + (" (dry run, nothing changed)" if CFG["dry_run"] else "")
         ch = await self._channel()
-        for i in range(0, len(lines), 20):
-            await ch.send(f"**{head}**\n" + "\n".join(lines[i:i + 20]))
+        for part in seasonal.chunks(list(placed)):
+            lines = "\n".join(f"{self.titles[k].label} [{self.titles[k].library}]: {self._names(placed[k])}" for k in part)
+            if CFG["dry_run"]:
+                await ch.send(f"**{head}**", embed=discord.Embed(description=lines))
+                continue
+            batch = uuid.uuid4().hex[:12]
+            self.state.seasonal_batch_add(batch, "placeundo", "", part)
+            await ch.send(f"**{head}**", embed=discord.Embed(description=lines),
+                          view=self._undo_view("p", batch, [(k, self.titles[k].label) for k in part]))
         if refusals:
             await ch.send("**NostalgiaTV refused**\n" + "\n".join(refusals))
 
@@ -852,6 +995,9 @@ class Allocator(discord.Client):
             return
         if action in ("sas", "sao", "san", "sus", "suo"):
             await self._seasonal_answer(it, action, key)
+            return
+        if action in ("pus", "puo"):
+            await self._place_undo(it, action, key)
             return
         pend = self.state.get_pending(key)
         if not pend:

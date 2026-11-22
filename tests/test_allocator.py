@@ -83,7 +83,7 @@ def make(keys):
     a.cfg, a.checks, a.last_scan, a.scan_summary, a.next_run = M.CFG, {}, {}, "", None
     a.recent_events, a.started, a.mass_warned = deque(maxlen=50), time.time(), False
     a.library_cache = (0.0, [])
-    a.seasonal_last, a.seasonal_running = {}, False
+    a.seasonal_last, a.seasonal_running, a.place_last, a.place_running = {}, False, {}, False
     a.auth = M.Auth(a.state); a.wake = asyncio.Event(); a.seeded = []
     a.health = M.Health(threshold=M.CFG["alert_after"], remind_hours=M.CFG["alert_remind"])
     ch = Chan()
@@ -107,7 +107,7 @@ async def run():
     check("failing title 4 did not stop the scan and stays retryable", not a.state.is_known("4"))
     check("refused film reported in Discord", any(m["content"] and "refused" in m["content"] and "Refused Film" in m["content"] for m in ch.sent))
     check("refused-everywhere film not recorded as placed (skipped)", a.state.db.execute("SELECT 1 FROM skipped WHERE key='5'").fetchone() is not None)
-    q = [m for m in ch.sent if m["view"] is not None]
+    q = [m for m in ch.sent if m["view"] is not None and (m["content"] or "").startswith("**Where should")]
     check("one question posted (The Office)", len(q) == 1 and q[0]["embed"].title == "The Office (US) (2005)")
     sel = q[0]["view"].children[0]
     defaults = [o.value for o in sel.options if o.default]
@@ -643,7 +643,76 @@ async def run_seasonal():
     t = await a.seasonal_run("recent", "automatic")
     check("seasonal: a failure is reported, not raised", t.startswith("Failed") and a.seasonal_last["ok"] is False)
     from app import settings as SM
-    check("seasonal: switch defined and on by default", SM.SPEC["seasonal"][1] is bool and SM.SPEC["seasonal"][2] is True)
+    check("seasonal: no switch (always automatic)", "seasonal" not in SM.SPEC)
+
+async def run_autoplace():
+    from app.rules import Placement
+    from app import settings as SM
+    check("auto: setting exists, off by default", SM.SPEC["auto_place"][1] is bool and SM.SPEC["auto_place"][2] is False)
+    TT = {"a1": Title("a1","movie","Sure Thing",2020,"Movies","x","PG",["Action"],""),
+          "a2": Title("a2","movie","Unsure",2020,"Movies","x","PG",["Drama"],""),
+          "a3": Title("a3","movie","Disputed",2020,"Movies","x","PG",["Action"],""),
+          "a4": Title("a4","movie","Later Sure",2020,"Movies","x","PG",["Action"],"")}
+    a, ch = make([]); a.state = M.State(tmp + "/auto.db")
+    a.profile_checked = True
+    async def ok(): pass
+    a.plex.probe = a.ntv.probe = ok
+    async def title(k): return TT.get(k)
+    a.plex.title = title
+    a.plex.recently_added = lambda d, i: _ret(list(a.plex.keys))
+    def place(t):
+        return {"a1": Placement(["app_genre_action"], True, []), "a2": Placement(["app_genre_action"], False, []),
+                "a3": Placement(["app_genre_action"], True, []), "a4": Placement(["app_genre_action"], True, [])}[t.key]
+    a.rules.place = place
+    async def cc(q): return {"MID:a3": ["app_nb_sea"]}.get(q, [])
+    a.ntv.channels_containing = cc
+    async def homes(nah): return {}, {"app_genre_action", "app_nb_sea"}, set()
+    a.ntv.config_homes = homes
+    async def unassigned(): return []
+    a.ntv.unassigned_keys = unassigned
+    lists = {"app_genre_action": []}
+    async def lae(): return {c: list(v) for c, v in lists.items()}, {}, set()
+    a.ntv.lists_and_exclusions = lae
+    async def add(chn, keys):
+        a.ntv.calls.append(("add", chn, tuple(keys))); lists.setdefault(chn, []).extend(keys); return {"refused": []}
+    a.ntv.add_to_channel = add
+    async def so(chn, **kw):
+        a.ntv.calls.append(("override", chn)); lists[chn] = list(kw["customMediaRatingKeys"])
+    a.ntv.set_override = so
+    edits = []
+    class FakeMsg:
+        def __init__(s, mid): s.mid = mid
+        async def edit(s, **kw): edits.append((s.mid, kw.get("content")))
+    async def fetch_message(mid): return FakeMsg(mid)
+    ch.fetch_message = fetch_message
+    M.CFG["dry_run"] = False; M.CFG["auto_place"] = False
+    a.plex.keys = ["a1", "a2"]
+    await a.scan()
+    check("auto off: confident title asked, not placed", a.state.get_pending("a1") is not None
+          and not any(c[0] == "add" for c in a.ntv.calls))
+    a.plex.keys = ["a1", "a2", "a3"]
+    M.CFG["auto_place"] = True
+    await a.scan()
+    check("auto on: NostalgiaTV disagreeing with the rules means ask", a.state.get_pending("a3") is not None)
+    M.CFG["auto_place"] = False
+    a.plex.keys = ["a4"]
+    t = await a.place_run("run by hand")
+    check("run by hand: works with the setting off", ("add", "app_genre_action", ("MID:a1",)) in a.ntv.calls
+          and ("add", "app_genre_action", ("MID:a4",)) in a.ntv.calls)
+    check("run by hand: open confident question closed", a.state.get_pending("a1") is None
+          and any("placed automatically" in (c or "") for _, c in edits))
+    check("run by hand: uncertain titles stay questions", a.state.get_pending("a2") is not None and a.state.get_pending("a3") is not None)
+    check("run by hand: summary counts", t.startswith("2 placed automatically") and "2 still need an answer" in t)
+    summ = [m for m in ch.sent if (m["content"] or "").startswith("**Placed automatically")]
+    check("auto summary carries an undo picker", summ and summ[-1]["view"] is not None)
+    batch = summ[-1]["view"].children[0].custom_id.split(":")[2]
+    keys = [o.value for o in summ[-1]["view"].children[0].options]
+    it = Inter(f"ntva:pus:{batch}", [keys[0]]); await a.on_interaction(it)
+    it = Inter(f"ntva:puo:{batch}"); await a.on_interaction(it)
+    check("undo: title taken off the channel and asked again", f"MID:{keys[0]}" not in lists["app_genre_action"]
+          and a.state.get_pending(keys[0]) is not None and a.state.get_done(keys[0]) is None)
+    check("undo: question posted", any((m["content"] or "").startswith("**Where should this go?") for m in ch.sent[-2:]))
+    M.CFG["auto_place"] = False
 
 def run_profile():
     from app.clients import choose_profile
@@ -675,6 +744,7 @@ asyncio.run(run_edit())
 run_settings_auth()
 asyncio.run(run_names())
 asyncio.run(run_seasonal())
+asyncio.run(run_autoplace())
 asyncio.run(run_apply_settings())
 print(f"\n{sum(PASS)}/{len(PASS)} checks passed")
 sys.exit(0 if all(PASS) else 1)

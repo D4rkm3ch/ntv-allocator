@@ -55,6 +55,12 @@ class State:
         return {"key": row[0], "label": row[1], "suggested": json.loads(row[2]), "selected": json.loads(row[3]),
                 "message_id": row[4]}
 
+    def count_placed_since(self, how_like: str, since: float) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM done WHERE how LIKE ? AND at >= ?", (how_like, since)).fetchone()[0]
+
+    def all_pending(self) -> list[dict]:
+        return [self.get_pending(r[0]) for r in self.db.execute("SELECT key FROM pending ORDER BY created")]
+
     def unsent(self) -> list[dict]:
         rows = self.db.execute("SELECT key FROM pending WHERE message_id IS NULL").fetchall()
         return [self.get_pending(r[0]) for r in rows]

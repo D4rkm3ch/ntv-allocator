@@ -33,7 +33,7 @@ CSS = """
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}}
 :root[data-theme=dark]{--bg:#14171c;--card:#1c2027;--fg:#e6e9ef;--dim:#8a93a6;--line:#2b313b;--ok:#3fbf73;--bad:#ef5a5a;--wait:#e0a83a}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
-main{max-width:960px;margin:0 auto;padding:24px 16px}h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0 0 10px}
+main{max-width:960px;margin:0 auto;padding:24px 16px}h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0 0 10px}h3{font-size:14px;margin:16px 0 6px}h2+h3{margin-top:4px}
 .brand{display:flex;align-items:center;gap:14px}.logo svg{width:52px;height:52px;display:block}
 .head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}
 .theme{background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:8px;width:38px;height:38px;display:grid;place-items:center;cursor:pointer;padding:0;flex:none}
@@ -196,7 +196,8 @@ def snapshot(a) -> dict:
             "placements": [{**p, "names": [a.rules.names.get(c, c) for c in p["channels"]]}
                            for p in a.state.recent_placements()],
             "profile": a.ntv.profile_id or "-", "settings": {k: a.cfg[k] for k in settings_mod.SPEC},
-            "started": a.started, "seasonal": a.seasonal_last, "seasonal_running": a.seasonal_running}
+            "started": a.started, "seasonal": a.seasonal_last, "seasonal_running": a.seasonal_running,
+            "place": a.place_last, "place_running": a.place_running}
 
 
 # ------------------------------------------------------------------ pages
@@ -237,6 +238,10 @@ def render(s: dict) -> str:
                 f'{e(sl["trigger"])})</span><div class=dim>{e(sl["summary"])}</div>')
     else:
         seas = '<span class=dim>No check since the allocator started.</span>'
+    pl = s.get("place") or {}
+    plc = ('<span class=dim>Running now.</span>' if s.get("place_running") else
+           f'Last run: {e(_t(pl["at"]))} <div class=dim>{e(pl["summary"])}</div>' if pl else
+           '<span class=dim>Not run since the allocator started.</span>')
     body = f"""{dry}
 <div class=card><div class=banner><span class="dot {s['overall']}"></span>{e(label)}</div></div>
 <div class=card><h2>Connections</h2><table><tr><th>Service</th><th>Status</th><th>Last check</th><th>Detail</th></tr>{rows}</table></div>
@@ -247,9 +252,15 @@ def render(s: dict) -> str:
 <div><div class=dim>Open removal questions</div><div class=num>{s["open_removals"]}</div></div>
 </div></div>
 <div class=card><h2>Recent placements</h2>{places}</div>
-<div class=card><h2>Christmas and Halloween</h2>
-<p class=dim style="margin:0 0 10px">Titles with Christmas or Halloween in their title go into the seasonal collections; possible matches are asked in Discord.
-Runs on every scan when switched on under Settings, or by hand here.</p>
+<div class=card><h2>Run by hand</h2>
+<h3>Placement</h3>
+<p class=dim style="margin:0 0 10px">Places every title the rules are confident about now, including open Discord questions,
+even when automatic placement is off. Anything uncertain stays a question.</p>
+<div>{plc}</div>
+<div class=row><button class=b type=button id=placenow>Place confident titles now</button><span class=msg id=placemsg></span></div>
+<h3>Christmas and Halloween</h3>
+<p class=dim style="margin:0 0 10px">Always automatic: titles with Christmas or Halloween in their title go into the seasonal
+collections on every scan, and possible matches are asked in Discord. Check the whole library to catch older titles.</p>
 <div>{seas}</div>
 <div class=row><button class=b type=button data-scope=recent>Check recent titles</button>
 <button class=b type=button data-scope=all>Check the whole library</button><span class=msg id=seasmsg></span></div></div>
@@ -283,6 +294,10 @@ document.getElementById("pw").addEventListener("submit", async function(ev){
   var el = document.getElementById("pwerr"); el.style.color = d.ok ? "var(--ok)" : ""; el.textContent = d.message || "";
   if (d.ok) f.reset();
 });
+document.getElementById("placenow").onclick = async function(){
+  var m = document.getElementById("placemsg"); m.textContent = "Starting...";
+  var d = await post("/api/place/run", {}); m.textContent = d.message || "";
+};
 document.querySelectorAll("button[data-scope]").forEach(function(b){
   b.onclick = async function(){
     var m = document.getElementById("seasmsg"); m.textContent = "Starting...";
@@ -521,13 +536,22 @@ async def start(a, port: int) -> None:
         return web.json_response({"ok": True, "message": "Started. Additions and questions are posted in Discord; "
                                                           "this page shows the result when it finishes."})
 
+    async def place_api(req):
+        if not logged_in(req):
+            return deny()
+        if a.place_running:
+            return web.json_response({"ok": False, "message": "A placement run is already running."})
+        asyncio.get_running_loop().create_task(a.place_run("run by hand"))
+        return web.json_response({"ok": True, "message": "Started. Placements are posted in Discord with Undo; "
+                                                          "this page shows the result when it finishes."})
+
     app = web.Application()
     app.add_routes([
         web.get("/api/status", api_status),
         web.post("/api/setup", api_setup), web.post("/api/login", api_login), web.post("/api/logout", api_logout),
         web.post("/api/password", api_password), web.post("/api/settings", api_settings),
         web.get("/api/placements/{key}", placement_get), web.post("/api/placements/{key}", placement_post),
-        web.post("/api/seasonal/run", seasonal_api),
+        web.post("/api/seasonal/run", seasonal_api), web.post("/api/place/run", place_api),
         web.get("/api/library", library_api), web.get("/library", library_page),
         # any other path shows the main page, so a stale or mistyped address still works
         web.get("/", page), web.get("/{tail:.*}", page)])

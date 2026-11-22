@@ -88,6 +88,18 @@ Plex, NostalgiaTV, Discord and the scans are working (with the reason when not),
 open questions, the last 50 actions, and the main settings. `/api/status` returns the same as JSON for
 Homepage or Home Assistant. It shows no tokens or passwords; keep the port on your LAN.
 
+## Automatic placement (optional)
+
+Off by default: every new show and movie is asked about in Discord. With **Automatic placement**
+switched on under Settings, a title is placed without asking when the rules in rules.yaml are
+confident and NostalgiaTV's own match, if it has one, includes at least one of the same channels.
+Everything else is still asked. Each automatic placement is listed in Discord with a picker to undo
+it; an undone title is taken off its channels and asked about instead.
+
+**Place confident titles now** on the status page does the same once, whatever the setting:
+it settles every open Discord question the rules are confident about (editing the question to say
+where it went) and places confident new titles. Uncertain titles stay questions.
+
 ## Christmas and Halloween
 
 The seasonal channels (any custom channel that reads a Plex collection named **Christmas** or
@@ -101,9 +113,9 @@ The seasonal channels (any custom channel that reads a Plex collection named **C
   about in Discord: pick the ones that belong and press Add selected, or None of these.
 - Plex collections belong to one library, so a library without a Christmas or Halloween collection
   gets one when its first title is added, and that collection is added to the channel in NostalgiaTV.
-- It runs on every scan for titles added within the look-back period when the switch is on under
-  Settings. The status page can run it by hand at any time, even when the switch is off, for
-  recent titles or for the whole library.
+- It always runs on every scan for titles added within the look-back period (there is no switch).
+  The status page can also run it by hand, for recent titles or for the whole library; run the
+  whole library once to catch older titles.
 - Libraries listed under `seasonal_ignore_libraries` in rules.yaml are skipped (default: Classicals,
   Fan Edits, Reality Shows, Music). Dry run applies: nothing changes in Plex while it is on.
 
